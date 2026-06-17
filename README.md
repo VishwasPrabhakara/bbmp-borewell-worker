@@ -80,16 +80,4 @@ npx wrangler deploy
 
 Do not commit `.dev.vars`, `.env`, database URLs, GitHub tokens, or KH credentials.
 
-## Suggested GitHub Details
 
-Description:
-
-```text
-Cloudflare Worker API for serving BBMP borewell dashboard data and triggering refresh jobs.
-```
-
-Topics:
-
-```text
-bbmp, borewell, cloudflare-workers, neon-postgres, serverless, api, github-actions, water-level
-```
