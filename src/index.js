@@ -86,7 +86,7 @@ export default {
           return json({ started: false, reason: "already_running", status: statusPayload(status) });
         }
 
-        if (status && !isStale(status.last_finished)) {
+        if (status?.ok !== false && status && !isStale(status.last_finished)) {
           return json({ started: false, reason: "fresh", status: statusPayload(status) });
         }
 
