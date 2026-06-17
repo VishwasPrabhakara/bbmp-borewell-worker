@@ -20,6 +20,16 @@ function isStale(lastFinished) {
   return Date.now() - last > FRESHNESS_HOURS * 60 * 60 * 1000;
 }
 
+function statusPayload(row = {}) {
+  return {
+    running: !!row.running,
+    ok: row.ok,
+    lastStarted: row.last_started || null,
+    lastFinished: row.last_finished || null,
+    message: row.message || ""
+  };
+}
+
 async function triggerGithubAction(env) {
   const url = `https://api.github.com/repos/${env.GH_OWNER}/${env.GH_REPO}/actions/workflows/refresh.yml/dispatches`;
 
@@ -57,7 +67,7 @@ export default {
           FROM refresh_status
           WHERE id = 1
         `;
-        return json(rows[0] || {});
+        return json(statusPayload(rows[0]));
       }
 
       if (url.pathname === "/api/refresh") {
@@ -69,11 +79,11 @@ export default {
         const status = rows[0];
 
         if (status?.running) {
-          return json({ started: false, reason: "already_running", status });
+          return json({ started: false, reason: "already_running", status: statusPayload(status) });
         }
 
         if (status && !isStale(status.last_finished)) {
-          return json({ started: false, reason: "fresh", status });
+          return json({ started: false, reason: "fresh", status: statusPayload(status) });
         }
 
         await sql`
