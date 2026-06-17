@@ -1,0 +1,23 @@
+{
+  "name": "bbmp-borewell-worker",
+  "description": "Cloudflare Worker API for the BBMP borewell dashboard.",
+  "type": "module",
+  "keywords": [
+    "bbmp",
+    "borewell",
+    "cloudflare-workers",
+    "neon",
+    "gis",
+    "dashboard"
+  ],
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^1.0.1"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
