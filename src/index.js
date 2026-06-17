@@ -30,6 +30,10 @@ function statusPayload(row = {}) {
   };
 }
 
+function isMissingRelation(error) {
+  return /relation .* does not exist/i.test(String(error?.message || error));
+}
+
 async function triggerGithubAction(env) {
   const url = `https://api.github.com/repos/${env.GH_OWNER}/${env.GH_REPO}/actions/workflows/refresh.yml/dispatches`;
 
@@ -154,6 +158,25 @@ export default {
 
       return json({ error: "Not found" }, 404);
     } catch (error) {
+      if (isMissingRelation(error)) {
+        if (url.pathname === "/api/status") {
+          return json(statusPayload({ running: false, ok: null, message: "Database is not initialized yet" }));
+        }
+
+        if (url.pathname === "/api/refresh") {
+          await triggerGithubAction(env);
+          return json({ started: true, reason: "database_not_initialized" });
+        }
+
+        if (url.pathname === "/api/sensors") {
+          return json({ sensors: [], sensorsWithWaterData: 0 });
+        }
+
+        if (url.pathname === "/api/water-level") {
+          return json({ uid: url.searchParams.get("uid") || "", points: [] });
+        }
+      }
+
       return json({ error: String(error.message || error) }, 500);
     }
   }
