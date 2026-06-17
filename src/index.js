@@ -1,6 +1,7 @@
 import { neon } from "@neondatabase/serverless";
 
 const FRESHNESS_HOURS = 6;
+const RUNNING_TIMEOUT_MINUTES = 30;
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -18,6 +19,12 @@ function isStale(lastFinished) {
   if (!lastFinished) return true;
   const last = new Date(lastFinished).getTime();
   return Date.now() - last > FRESHNESS_HOURS * 60 * 60 * 1000;
+}
+
+function isRunningStale(lastStarted) {
+  if (!lastStarted) return false;
+  const started = new Date(lastStarted).getTime();
+  return Date.now() - started > RUNNING_TIMEOUT_MINUTES * 60 * 1000;
 }
 
 function statusPayload(row = {}) {
@@ -82,7 +89,7 @@ export default {
         `;
         const status = rows[0];
 
-        if (status?.running) {
+        if (status?.running && !isRunningStale(status.last_started)) {
           return json({ started: false, reason: "already_running", status: statusPayload(status) });
         }
 
