@@ -51,6 +51,26 @@ function isMissingRelation(error) {
   return /relation .* does not exist/i.test(String(error?.message || error));
 }
 
+function byteaToBytes(value) {
+  if (value instanceof Uint8Array) return value;
+  if (Array.isArray(value)) return new Uint8Array(value);
+  if (value?.data && Array.isArray(value.data)) return new Uint8Array(value.data);
+  if (typeof value === "string" && value.startsWith("\\x")) {
+    const bytes = new Uint8Array((value.length - 2) / 2);
+    for (let index = 2; index < value.length; index += 2) {
+      bytes[(index - 2) / 2] = Number.parseInt(value.slice(index, index + 2), 16);
+    }
+    return bytes;
+  }
+  throw new Error("Unsupported uploaded payload format");
+}
+
+async function gunzipJson(value) {
+  const bytes = byteaToBytes(value);
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+  return new Response(stream).json();
+}
+
 function requireAdmin(request, env) {
   const expected = env.ADMIN_PASSWORD;
   const provided = request.headers.get("x-admin-password") || "";
@@ -106,6 +126,24 @@ async function ensureUploadedTables(sql) {
       water_level_stop_m DOUBLE PRECISION NULL,
       water_level_stop_ft DOUBLE PRECISION NULL,
       session_duration_min DOUBLE PRECISION NULL
+    )
+  `;
+}
+
+async function ensureCompactUploadTable(sql) {
+  await sql`
+    CREATE TABLE IF NOT EXISTS uploaded_sensor_series (
+      uid TEXT PRIMARY KEY REFERENCES sensors(uid) ON DELETE CASCADE,
+      lat DOUBLE PRECISION NULL,
+      lng DOUBLE PRECISION NULL,
+      source_file_count INTEGER DEFAULT 0,
+      first_data_at TIMESTAMP NULL,
+      last_data_at TIMESTAMP NULL,
+      water_readings INTEGER DEFAULT 0,
+      discharge_readings INTEGER DEFAULT 0,
+      total_readings INTEGER DEFAULT 0,
+      payload_gzip BYTEA NOT NULL,
+      updated_at TIMESTAMP DEFAULT NOW()
     )
   `;
 }
@@ -676,6 +714,23 @@ export default {
       if (url.pathname === "/api/water-level") {
         const uid = url.searchParams.get("uid");
         if (!uid) return json({ error: "uid is required" }, 400);
+
+        await ensureCompactUploadTable(sql);
+        const compactRows = await sql`
+          SELECT payload_gzip
+          FROM uploaded_sensor_series
+          WHERE uid = ${uid}
+          LIMIT 1
+        `;
+
+        if (compactRows.length) {
+          const points = await gunzipJson(compactRows[0].payload_gzip);
+          return json({
+            uid,
+            source: "uploaded_compact",
+            points
+          });
+        }
 
         await ensureUploadedTables(sql);
         const uploaded = await sql`
