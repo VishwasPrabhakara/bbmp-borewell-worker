@@ -187,9 +187,10 @@ async function recalculateSummaries(sql) {
 async function upsertAdminSensors(sql, rowsJson) {
   await sql`
     WITH input AS (
-      SELECT DISTINCT uid, lat, lng
+      SELECT uid, MAX(lat) AS lat, MAX(lng) AS lng
       FROM jsonb_to_recordset(${rowsJson}::jsonb) AS x(uid text, lat double precision, lng double precision)
       WHERE uid IS NOT NULL AND uid <> ''
+      GROUP BY uid
     )
     INSERT INTO sensors (uid, lat, lng, data_category, has_data, water_readings, discharge_readings, total_readings)
     SELECT uid, lat, lng, 'none', false, 0, 0, 0
@@ -313,7 +314,7 @@ function adminPage() {
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
   <script>
     const M_TO_FT = 3.280839895;
-    const BATCH_SIZE = 750;
+    const BATCH_SIZE = 250;
     const logEl = document.getElementById('log');
     const button = document.getElementById('upload');
     const passwordEl = document.getElementById('password');
@@ -417,6 +418,7 @@ function adminPage() {
       const password = passwordEl.value;
       if (!file) throw new Error('Choose a zip file first.');
       if (!password) throw new Error('Enter the admin password.');
+      if (!window.JSZip) throw new Error('Could not load JSZip. Check internet access to cdn.jsdelivr.net, then refresh this admin page.');
 
       button.disabled = true;
       logEl.textContent = 'Reading zip...';
@@ -528,16 +530,24 @@ export default {
         if (!requireAdmin(request, env)) return json({ error: "Unauthorized" }, 401);
         const payload = await request.json();
         const rows = Array.isArray(payload.rows) ? payload.rows : [];
-        await uploadTypeA(sql, rows);
-        return json({ ok: true, count: rows.length });
+        try {
+          await uploadTypeA(sql, rows);
+          return json({ ok: true, count: rows.length });
+        } catch (error) {
+          return json({ error: String(error.message || error), route: "upload-type-a" }, 500);
+        }
       }
 
       if (url.pathname === "/api/admin/upload-type-b" && request.method === "POST") {
         if (!requireAdmin(request, env)) return json({ error: "Unauthorized" }, 401);
         const payload = await request.json();
         const rows = Array.isArray(payload.rows) ? payload.rows : [];
-        await uploadTypeB(sql, rows);
-        return json({ ok: true, count: rows.length });
+        try {
+          await uploadTypeB(sql, rows);
+          return json({ ok: true, count: rows.length });
+        } catch (error) {
+          return json({ error: String(error.message || error), route: "upload-type-b" }, 500);
+        }
       }
 
       if (url.pathname === "/api/admin/recalculate-summaries" && request.method === "POST") {
