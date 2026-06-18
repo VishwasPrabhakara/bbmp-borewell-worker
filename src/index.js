@@ -108,6 +108,21 @@ async function ensureUploadedTables(sql) {
       session_duration_min DOUBLE PRECISION NULL
     )
   `;
+  await sql`
+    DELETE FROM uploaded_type_a_readings a
+    USING uploaded_type_a_readings b
+    WHERE a.id > b.id
+      AND a.uid = b.uid
+      AND a.time = b.time
+  `;
+  await sql`
+    DELETE FROM uploaded_type_b_sessions a
+    USING uploaded_type_b_sessions b
+    WHERE a.id > b.id
+      AND a.uid = b.uid
+      AND a.start_time = b.start_time
+      AND a.stop_time = b.stop_time
+  `;
   await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_uploaded_type_a_uid_time_unique ON uploaded_type_a_readings(uid, time)`;
   await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_uploaded_type_b_uid_session_unique ON uploaded_type_b_sessions(uid, start_time, stop_time)`;
 }
@@ -206,7 +221,7 @@ async function uploadTypeA(sql, rows) {
   const rowsJson = JSON.stringify(rows);
   await upsertAdminSensors(sql, rowsJson);
   await sql`
-    WITH input AS (
+    WITH raw_input AS (
       SELECT *
       FROM jsonb_to_recordset(${rowsJson}::jsonb) AS x(
         uid text,
@@ -218,11 +233,24 @@ async function uploadTypeA(sql, rows) {
         power_kw double precision,
         pump_status text
       )
+    ),
+    input AS (
+      SELECT
+        uid,
+        MAX(lat) AS lat,
+        MAX(lng) AS lng,
+        MAX(source_file) AS source_file,
+        time,
+        MAX(discharge) AS discharge,
+        MAX(power_kw) AS power_kw,
+        MAX(pump_status) AS pump_status
+      FROM raw_input
+      WHERE uid IS NOT NULL AND uid <> '' AND time IS NOT NULL
+      GROUP BY uid, time
     )
     INSERT INTO uploaded_type_a_readings (uid, lat, lng, source_file, time, discharge, power_kw, pump_status)
     SELECT uid, lat, lng, source_file, time, discharge, power_kw, pump_status
     FROM input
-    WHERE uid IS NOT NULL AND time IS NOT NULL
     ON CONFLICT (uid, time) DO UPDATE SET
       lat = COALESCE(EXCLUDED.lat, uploaded_type_a_readings.lat),
       lng = COALESCE(EXCLUDED.lng, uploaded_type_a_readings.lng),
@@ -238,7 +266,7 @@ async function uploadTypeB(sql, rows) {
   const rowsJson = JSON.stringify(rows);
   await upsertAdminSensors(sql, rowsJson);
   await sql`
-    WITH input AS (
+    WITH raw_input AS (
       SELECT *
       FROM jsonb_to_recordset(${rowsJson}::jsonb) AS x(
         uid text,
@@ -255,6 +283,25 @@ async function uploadTypeB(sql, rows) {
         water_level_stop_ft double precision,
         session_duration_min double precision
       )
+    ),
+    input AS (
+      SELECT
+        uid,
+        MAX(lat) AS lat,
+        MAX(lng) AS lng,
+        MAX(source_file) AS source_file,
+        start_time,
+        stop_time,
+        MAX(tts_start_seconds) AS tts_start_seconds,
+        MAX(water_level_start_m) AS water_level_start_m,
+        MAX(water_level_start_ft) AS water_level_start_ft,
+        MAX(tts_stop_seconds) AS tts_stop_seconds,
+        MAX(water_level_stop_m) AS water_level_stop_m,
+        MAX(water_level_stop_ft) AS water_level_stop_ft,
+        MAX(session_duration_min) AS session_duration_min
+      FROM raw_input
+      WHERE uid IS NOT NULL AND uid <> '' AND start_time IS NOT NULL AND stop_time IS NOT NULL
+      GROUP BY uid, start_time, stop_time
     )
     INSERT INTO uploaded_type_b_sessions (
       uid, lat, lng, source_file, start_time, stop_time,
@@ -268,7 +315,6 @@ async function uploadTypeB(sql, rows) {
       tts_stop_seconds, water_level_stop_m, water_level_stop_ft,
       session_duration_min
     FROM input
-    WHERE uid IS NOT NULL AND start_time IS NOT NULL AND stop_time IS NOT NULL
     ON CONFLICT (uid, start_time, stop_time) DO UPDATE SET
       lat = COALESCE(EXCLUDED.lat, uploaded_type_b_sessions.lat),
       lng = COALESCE(EXCLUDED.lng, uploaded_type_b_sessions.lng),
