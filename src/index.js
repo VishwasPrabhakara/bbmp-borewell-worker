@@ -108,8 +108,6 @@ async function ensureUploadedTables(sql) {
       session_duration_min DOUBLE PRECISION NULL
     )
   `;
-  await sql`CREATE INDEX IF NOT EXISTS idx_uploaded_type_a_uid_time ON uploaded_type_a_readings(uid, time)`;
-  await sql`CREATE INDEX IF NOT EXISTS idx_uploaded_type_b_uid_session ON uploaded_type_b_sessions(uid, start_time, stop_time)`;
 }
 
 async function recalculateSummaries(sql) {
