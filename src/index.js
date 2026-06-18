@@ -83,7 +83,7 @@ export default {
 
       if (url.pathname === "/api/refresh") {
         const rows = await sql`
-          SELECT running, ok, last_finished, message
+          SELECT running, ok, last_started, last_finished, message
           FROM refresh_status
           WHERE id = 1
         `;
