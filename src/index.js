@@ -338,7 +338,7 @@ function adminPage() {
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
   <script>
     const M_TO_FT = 3.280839895;
-    const BATCH_SIZE = 250;
+    const BATCH_SIZE = 1500;
     const logEl = document.getElementById('log');
     const button = document.getElementById('upload');
     const passwordEl = document.getElementById('password');
@@ -437,6 +437,21 @@ function adminPage() {
       return sent;
     }
 
+    async function flushQueue(queue, path, password) {
+      if (!queue.length) return 0;
+      const batch = queue.splice(0, queue.length);
+      return postRows(path, batch, password);
+    }
+
+    async function flushIfNeeded(queue, path, password) {
+      let sent = 0;
+      while (queue.length >= BATCH_SIZE) {
+        const batch = queue.splice(0, BATCH_SIZE);
+        sent += await postRows(path, batch, password);
+      }
+      return sent;
+    }
+
     async function upload() {
       const file = zipEl.files[0];
       const password = passwordEl.value;
@@ -450,6 +465,8 @@ function adminPage() {
       let typeACount = 0;
       let typeBCount = 0;
       let files = 0;
+      const typeAQueue = [];
+      const typeBQueue = [];
 
       for (const entry of Object.values(zip.files)) {
         if (entry.dir || !entry.name.toLowerCase().endsWith('.csv')) continue;
@@ -483,7 +500,8 @@ function adminPage() {
               pump_status: row.pump_status || null
             };
           }).filter(Boolean);
-          typeACount += await postRows('/api/admin/upload-type-a', parsed, password);
+          typeAQueue.push(...parsed);
+          typeACount += await flushIfNeeded(typeAQueue, '/api/admin/upload-type-a', password);
         }
 
         if (info.kind === 'TYPEB') {
@@ -509,11 +527,18 @@ function adminPage() {
               session_duration_min: number(row['session duration (min)'])
             };
           }).filter(Boolean);
-          typeBCount += await postRows('/api/admin/upload-type-b', parsed, password);
+          typeBQueue.push(...parsed);
+          typeBCount += await flushIfNeeded(typeBQueue, '/api/admin/upload-type-b', password);
         }
 
-        log('Processed ' + files + ' files. TypeA rows: ' + typeACount + ', TypeB sessions: ' + typeBCount);
+        if (files % 25 === 0) {
+          log('Processed ' + files + ' files. Uploaded TypeA rows: ' + typeACount + ', TypeB sessions: ' + typeBCount + '. Queued: ' + (typeAQueue.length + typeBQueue.length));
+        }
       }
+
+      typeACount += await flushQueue(typeAQueue, '/api/admin/upload-type-a', password);
+      typeBCount += await flushQueue(typeBQueue, '/api/admin/upload-type-b', password);
+      log('Finished uploading rows. Updating summaries...');
 
       const response = await fetch('/api/admin/recalculate-summaries', {
         method: 'POST',
