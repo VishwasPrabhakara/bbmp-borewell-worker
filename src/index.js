@@ -108,23 +108,8 @@ async function ensureUploadedTables(sql) {
       session_duration_min DOUBLE PRECISION NULL
     )
   `;
-  await sql`
-    DELETE FROM uploaded_type_a_readings a
-    USING uploaded_type_a_readings b
-    WHERE a.id > b.id
-      AND a.uid = b.uid
-      AND a.time = b.time
-  `;
-  await sql`
-    DELETE FROM uploaded_type_b_sessions a
-    USING uploaded_type_b_sessions b
-    WHERE a.id > b.id
-      AND a.uid = b.uid
-      AND a.start_time = b.start_time
-      AND a.stop_time = b.stop_time
-  `;
-  await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_uploaded_type_a_uid_time_unique ON uploaded_type_a_readings(uid, time)`;
-  await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_uploaded_type_b_uid_session_unique ON uploaded_type_b_sessions(uid, start_time, stop_time)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_uploaded_type_a_uid_time ON uploaded_type_a_readings(uid, time)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_uploaded_type_b_uid_session ON uploaded_type_b_sessions(uid, start_time, stop_time)`;
 }
 
 async function recalculateSummaries(sql) {
@@ -142,13 +127,13 @@ async function recalculateSummaries(sql) {
   `;
   await sql`
     WITH uploaded_points AS (
-      SELECT uid, time, false AS has_water, true AS has_discharge
+      SELECT DISTINCT uid, time, false AS has_water, true AS has_discharge
       FROM uploaded_type_a_readings
       UNION ALL
-      SELECT uid, start_time AS time, true AS has_water, false AS has_discharge
+      SELECT DISTINCT uid, start_time AS time, true AS has_water, false AS has_discharge
       FROM uploaded_type_b_sessions
       UNION ALL
-      SELECT uid, stop_time AS time, true AS has_water, false AS has_discharge
+      SELECT DISTINCT uid, stop_time AS time, true AS has_water, false AS has_discharge
       FROM uploaded_type_b_sessions
     ),
     uploaded_uids AS (
@@ -251,13 +236,12 @@ async function uploadTypeA(sql, rows) {
     INSERT INTO uploaded_type_a_readings (uid, lat, lng, source_file, time, discharge, power_kw, pump_status)
     SELECT uid, lat, lng, source_file, time, discharge, power_kw, pump_status
     FROM input
-    ON CONFLICT (uid, time) DO UPDATE SET
-      lat = COALESCE(EXCLUDED.lat, uploaded_type_a_readings.lat),
-      lng = COALESCE(EXCLUDED.lng, uploaded_type_a_readings.lng),
-      source_file = COALESCE(EXCLUDED.source_file, uploaded_type_a_readings.source_file),
-      discharge = COALESCE(EXCLUDED.discharge, uploaded_type_a_readings.discharge),
-      power_kw = COALESCE(EXCLUDED.power_kw, uploaded_type_a_readings.power_kw),
-      pump_status = COALESCE(EXCLUDED.pump_status, uploaded_type_a_readings.pump_status)
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM uploaded_type_a_readings existing
+      WHERE existing.uid = input.uid
+        AND existing.time = input.time
+    )
   `;
 }
 
@@ -315,17 +299,13 @@ async function uploadTypeB(sql, rows) {
       tts_stop_seconds, water_level_stop_m, water_level_stop_ft,
       session_duration_min
     FROM input
-    ON CONFLICT (uid, start_time, stop_time) DO UPDATE SET
-      lat = COALESCE(EXCLUDED.lat, uploaded_type_b_sessions.lat),
-      lng = COALESCE(EXCLUDED.lng, uploaded_type_b_sessions.lng),
-      source_file = COALESCE(EXCLUDED.source_file, uploaded_type_b_sessions.source_file),
-      tts_start_seconds = COALESCE(EXCLUDED.tts_start_seconds, uploaded_type_b_sessions.tts_start_seconds),
-      water_level_start_m = COALESCE(EXCLUDED.water_level_start_m, uploaded_type_b_sessions.water_level_start_m),
-      water_level_start_ft = COALESCE(EXCLUDED.water_level_start_ft, uploaded_type_b_sessions.water_level_start_ft),
-      tts_stop_seconds = COALESCE(EXCLUDED.tts_stop_seconds, uploaded_type_b_sessions.tts_stop_seconds),
-      water_level_stop_m = COALESCE(EXCLUDED.water_level_stop_m, uploaded_type_b_sessions.water_level_stop_m),
-      water_level_stop_ft = COALESCE(EXCLUDED.water_level_stop_ft, uploaded_type_b_sessions.water_level_stop_ft),
-      session_duration_min = COALESCE(EXCLUDED.session_duration_min, uploaded_type_b_sessions.session_duration_min)
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM uploaded_type_b_sessions existing
+      WHERE existing.uid = input.uid
+        AND existing.start_time = input.start_time
+        AND existing.stop_time = input.stop_time
+    )
   `;
 }
 
