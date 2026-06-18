@@ -684,12 +684,32 @@ export default {
       }
 
       if (url.pathname === "/api/sensors") {
+        await ensureCompactUploadTable(sql);
         const rows = await sql`
-          SELECT uid, lat, lng, ward_no, ward_name, data_category, has_data,
-                 first_data_at, last_data_at,
-                 water_readings, discharge_readings, total_readings
-          FROM sensors
-          ORDER BY uid
+          SELECT
+            COALESCE(s.uid, uploaded.uid) AS uid,
+            COALESCE(uploaded.lat, s.lat) AS lat,
+            COALESCE(uploaded.lng, s.lng) AS lng,
+            s.ward_no,
+            s.ward_name,
+            CASE
+              WHEN uploaded.uid IS NOT NULL AND COALESCE(uploaded.water_readings, 0) > 0 AND COALESCE(uploaded.discharge_readings, 0) > 0 THEN 'both'
+              WHEN uploaded.uid IS NOT NULL AND COALESCE(uploaded.water_readings, 0) > 0 THEN 'water'
+              WHEN uploaded.uid IS NOT NULL AND COALESCE(uploaded.discharge_readings, 0) > 0 THEN 'discharge'
+              ELSE COALESCE(s.data_category, 'none')
+            END AS data_category,
+            CASE
+              WHEN uploaded.uid IS NOT NULL THEN COALESCE(uploaded.water_readings, 0) > 0 OR COALESCE(uploaded.discharge_readings, 0) > 0
+              ELSE COALESCE(s.has_data, false)
+            END AS has_data,
+            COALESCE(uploaded.first_data_at, s.first_data_at) AS first_data_at,
+            COALESCE(uploaded.last_data_at, s.last_data_at) AS last_data_at,
+            COALESCE(uploaded.water_readings, s.water_readings, 0) AS water_readings,
+            COALESCE(uploaded.discharge_readings, s.discharge_readings, 0) AS discharge_readings,
+            COALESCE(uploaded.total_readings, s.total_readings, 0) AS total_readings
+          FROM sensors s
+          FULL OUTER JOIN uploaded_sensor_series uploaded ON uploaded.uid = s.uid
+          ORDER BY COALESCE(s.uid, uploaded.uid)
         `;
 
         return json({
