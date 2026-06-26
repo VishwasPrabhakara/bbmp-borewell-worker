@@ -824,6 +824,95 @@ export default {
         });
       }
 
+            if (url.pathname === "/api/consumption/wards") {
+        const rows = await sql`
+          WITH latest AS (
+            SELECT DISTINCT ON (normalized_ward_name)
+              ward_name,
+              normalized_ward_name,
+              month,
+              connections,
+              consumption_ml,
+              consumption_per_connection
+            FROM ward_monthly_consumption
+            ORDER BY normalized_ward_name, month DESC
+          ),
+          summary AS (
+            SELECT
+              normalized_ward_name,
+              MIN(month) AS first_month,
+              MAX(month) AS last_month,
+              COUNT(*) AS month_count,
+              AVG(consumption_ml) AS avg_consumption_ml,
+              AVG(consumption_per_connection) AS avg_consumption_per_connection
+            FROM ward_monthly_consumption
+            GROUP BY normalized_ward_name
+          )
+          SELECT
+            latest.ward_name,
+            latest.normalized_ward_name,
+            latest.month AS latest_month,
+            latest.connections,
+            latest.consumption_ml,
+            latest.consumption_per_connection,
+            summary.first_month,
+            summary.last_month,
+            summary.month_count,
+            summary.avg_consumption_ml,
+            summary.avg_consumption_per_connection
+          FROM latest
+          JOIN summary USING (normalized_ward_name)
+          ORDER BY latest.ward_name
+        `;
+
+        return json({
+          wards: rows.map(row => ({
+            wardName: row.ward_name,
+            normalizedWardName: row.normalized_ward_name,
+            latestMonth: row.latest_month,
+            connections: row.connections || 0,
+            consumptionMl: row.consumption_ml || 0,
+            consumptionPerConnection: row.consumption_per_connection || 0,
+            firstMonth: row.first_month,
+            lastMonth: row.last_month,
+            monthCount: row.month_count || 0,
+            avgConsumptionMl: row.avg_consumption_ml || 0,
+            avgConsumptionPerConnection: row.avg_consumption_per_connection || 0
+          })),
+          count: rows.length
+        });
+      }
+
+            if (url.pathname === "/api/criticality/wards") {
+        const rows = await sql`
+          SELECT *
+          FROM ward_criticality_summary
+          ORDER BY criticality_score DESC, ward_no
+        `;
+
+        return json({
+          wards: rows.map(row => ({
+            wardNo: row.ward_no,
+            wardName: row.ward_name,
+            qcConfidence: row.qc_confidence,
+            usableSensorCount: row.usable_sensor_count || 0,
+            avgQcScore: row.avg_qc_score || 0,
+            latestConsumptionMl: row.latest_consumption_ml,
+            latestConnections: row.latest_connections,
+            latestConsumptionPerConnection: row.latest_consumption_per_connection,
+            recent90DayRainfallMm: row.recent_90_day_rainfall_mm,
+            demandScore: row.demand_score || 0,
+            groundwaterQcScore: row.groundwater_qc_score || 0,
+            rainfallScore: row.rainfall_score || 0,
+            criticalityScore: row.criticality_score || 0,
+            criticalityStatus: row.criticality_status || "Insufficient Data",
+            reasons: Array.isArray(row.reasons) ? row.reasons : [],
+            updatedAt: row.updated_at
+          })),
+          count: rows.length
+        });
+      }
+
       if (url.pathname === "/api/water-level") {
         const uid = url.searchParams.get("uid");
         if (!uid) return json({ error: "uid is required" }, 400);
