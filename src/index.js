@@ -731,6 +731,99 @@ export default {
         });
       }
 
+      if (url.pathname === "/api/qc/sensors") {
+        const wardNo = url.searchParams.get("ward_no");
+        const status = url.searchParams.get("status");
+        const rows = wardNo && status ? await sql`
+          SELECT *
+          FROM sensor_qc_summary
+          WHERE ward_no = ${wardNo}
+            AND qc_status = ${status}
+          ORDER BY ward_no, overall_qc_score DESC, uid
+        ` : wardNo ? await sql`
+          SELECT *
+          FROM sensor_qc_summary
+          WHERE ward_no = ${wardNo}
+          ORDER BY overall_qc_score DESC, uid
+        ` : status ? await sql`
+          SELECT *
+          FROM sensor_qc_summary
+          WHERE qc_status = ${status}
+          ORDER BY ward_no, overall_qc_score DESC, uid
+        ` : await sql`
+          SELECT *
+          FROM sensor_qc_summary
+          ORDER BY ward_no, overall_qc_score DESC, uid
+        `;
+
+        return json({
+          sensors: rows.map(row => ({
+            uid: row.uid,
+            wardNo: row.ward_no,
+            wardName: row.ward_name,
+            lat: row.lat,
+            lng: row.lng,
+            dataSource: row.data_source,
+            firstDataAt: row.first_data_at,
+            lastDataAt: row.last_data_at,
+            totalReadings: row.total_readings || 0,
+            validReadings: row.valid_readings || 0,
+            invalidReadings: row.invalid_readings || 0,
+            waterReadings: row.water_readings || 0,
+            dischargeReadings: row.discharge_readings || 0,
+            duplicateTimestampCount: row.duplicate_timestamp_count || 0,
+            gapCount: row.gap_count || 0,
+            maxGapHours: row.max_gap_hours || 0,
+            rangeErrorCount: row.range_error_count || 0,
+            spikeCount: row.spike_count || 0,
+            flatlineCount: row.flatline_count || 0,
+            staleDataDays: row.stale_data_days,
+            coverageScore: row.coverage_score || 0,
+            rangeScore: row.range_score || 0,
+            stabilityScore: row.stability_score || 0,
+            recentDataScore: row.recent_data_score || 0,
+            overallQcScore: row.overall_qc_score || 0,
+            qcStatus: row.qc_status || "NO_DATA",
+            flags: Array.isArray(row.flags) ? row.flags : [],
+            updatedAt: row.updated_at
+          })),
+          count: rows.length
+        });
+      }
+
+      if (url.pathname === "/api/qc/wards") {
+        const rows = await sql`
+          SELECT *
+          FROM ward_sensor_qc_summary
+          ORDER BY
+            CASE confidence
+              WHEN 'High' THEN 1
+              WHEN 'Medium' THEN 2
+              ELSE 3
+            END,
+            avg_qc_score DESC,
+            ward_no
+        `;
+
+        return json({
+          wards: rows.map(row => ({
+            wardNo: row.ward_no,
+            wardName: row.ward_name,
+            sensorCount: row.sensor_count || 0,
+            sensorsWithData: row.sensors_with_data || 0,
+            goodSensorCount: row.good_sensor_count || 0,
+            usableSensorCount: row.usable_sensor_count || 0,
+            poorSensorCount: row.poor_sensor_count || 0,
+            insufficientSensorCount: row.insufficient_sensor_count || 0,
+            noDataSensorCount: row.no_data_sensor_count || 0,
+            avgQcScore: row.avg_qc_score || 0,
+            confidence: row.confidence || "Low",
+            updatedAt: row.updated_at
+          })),
+          count: rows.length
+        });
+      }
+
       if (url.pathname === "/api/water-level") {
         const uid = url.searchParams.get("uid");
         if (!uid) return json({ error: "uid is required" }, 400);
@@ -816,6 +909,14 @@ export default {
 
         if (url.pathname === "/api/sensors") {
           return json({ sensors: [], sensorsWithWaterData: 0 });
+        }
+
+        if (url.pathname === "/api/qc/sensors") {
+          return json({ sensors: [], count: 0 });
+        }
+
+        if (url.pathname === "/api/qc/wards") {
+          return json({ wards: [], count: 0 });
         }
 
         if (url.pathname === "/api/water-level") {

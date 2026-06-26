@@ -39,6 +39,10 @@ GET /api/status
 GET /api/refresh
 GET /api/sensors
 GET /api/water-level?uid=<sensor_uid>
+GET /api/qc/sensors
+GET /api/qc/sensors?ward_no=<ward_no>
+GET /api/qc/sensors?status=<qc_status>
+GET /api/qc/wards
 GET /admin-upload
 POST /api/admin/upload-type-a
 POST /api/admin/upload-type-b
@@ -88,6 +92,19 @@ npm install
 npx wrangler dev
 ```
 
+For local development, create `.dev.vars` with local-only secret values:
+
+```text
+DATABASE_URL=<Neon PostgreSQL connection string>
+GITHUB_TOKEN=dummy
+GH_OWNER=VishwasPrabhakara
+GH_REPO=bbmp-borewell-backend
+GH_BRANCH=main
+ADMIN_PASSWORD=dummy
+```
+
+Only `DATABASE_URL` is required to test read-only routes such as `/api/sensors`, `/api/water-level`, `/api/qc/sensors`, and `/api/qc/wards`.
+
 ## Deploy
 
 ```powershell
@@ -98,3 +115,28 @@ npx wrangler deploy
 
 Do not commit `.dev.vars`, `.env`, database URLs, GitHub tokens, or KH credentials.
 
+## Sensor QC API
+
+The QC routes read from backend-generated tables:
+
+```text
+sensor_qc_summary
+ward_sensor_qc_summary
+```
+
+Run the backend QC job before using these routes:
+
+```powershell
+cd D:\bbmp-borewell-backend
+python run_sensor_qc.py
+```
+
+Supported QC status values:
+
+```text
+GOOD
+USABLE_WITH_CAUTION
+POOR
+INSUFFICIENT_DATA
+NO_DATA
+```
