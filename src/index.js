@@ -25,6 +25,22 @@ function html(body, status = 200) {
   });
 }
 
+function csvEscape(value) {
+  const text = String(value ?? "");
+  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function csvResponse(headers, rows, filename) {
+  const body = [headers, ...rows].map(row => row.map(csvEscape).join(",")).join("\n");
+  return new Response(body, {
+    headers: {
+      "content-type": "text/csv; charset=utf-8",
+      "content-disposition": `attachment; filename="${filename}"`,
+      "access-control-allow-origin": "*"
+    }
+  });
+}
+
 function isStale(lastFinished) {
   if (!lastFinished) return true;
   const last = new Date(lastFinished).getTime();
@@ -901,12 +917,106 @@ export default {
             latestConnections: row.latest_connections,
             latestConsumptionPerConnection: row.latest_consumption_per_connection,
             recent90DayRainfallMm: row.recent_90_day_rainfall_mm,
+            latestMedianWaterLevelFt: row.latest_median_water_level_ft,
+            latestMedianDischargeLpm: row.latest_median_discharge_lpm,
+            waterLevelTrendFtPerYear: row.water_level_trend_ft_per_year,
+            dischargeTrendLpmPerYear: row.discharge_trend_lpm_per_year,
+            rainfallResponseFt: row.rainfall_response_ft,
+            rainyEventCount: row.rainy_event_count || 0,
             demandScore: row.demand_score || 0,
             groundwaterQcScore: row.groundwater_qc_score || 0,
             rainfallScore: row.rainfall_score || 0,
+            depletionScore: row.depletion_score || 0,
+            dischargeDeclineScore: row.discharge_decline_score || 0,
+            recoveryScore: row.recovery_score || 0,
             criticalityScore: row.criticality_score || 0,
             criticalityStatus: row.criticality_status || "Insufficient Data",
             reasons: Array.isArray(row.reasons) ? row.reasons : [],
+            updatedAt: row.updated_at
+          })),
+          count: rows.length
+        });
+      }
+
+      if (url.pathname === "/api/criticality/wards.csv") {
+        const rows = await sql`
+          SELECT *
+          FROM ward_criticality_summary
+          ORDER BY criticality_score DESC, ward_no
+        `;
+        const headers = [
+          "ward_no",
+          "ward_name",
+          "criticality_status",
+          "criticality_score",
+          "qc_confidence",
+          "usable_sensor_count",
+          "latest_consumption_ml",
+          "latest_connections",
+          "latest_consumption_per_connection",
+          "recent_90_day_rainfall_mm",
+          "latest_median_water_level_ft",
+          "latest_median_discharge_lpm",
+          "water_level_trend_ft_per_year",
+          "discharge_trend_lpm_per_year",
+          "rainfall_response_ft",
+          "rainy_event_count",
+          "demand_score",
+          "depletion_score",
+          "discharge_decline_score",
+          "recovery_score",
+          "rainfall_score",
+          "reasons"
+        ];
+        const csvRows = rows.map(row => [
+          row.ward_no,
+          row.ward_name,
+          row.criticality_status,
+          row.criticality_score,
+          row.qc_confidence,
+          row.usable_sensor_count,
+          row.latest_consumption_ml,
+          row.latest_connections,
+          row.latest_consumption_per_connection,
+          row.recent_90_day_rainfall_mm,
+          row.latest_median_water_level_ft,
+          row.latest_median_discharge_lpm,
+          row.water_level_trend_ft_per_year,
+          row.discharge_trend_lpm_per_year,
+          row.rainfall_response_ft,
+          row.rainy_event_count,
+          row.demand_score,
+          row.depletion_score,
+          row.discharge_decline_score,
+          row.recovery_score,
+          row.rainfall_score,
+          Array.isArray(row.reasons) ? row.reasons.join("; ") : ""
+        ]);
+        return csvResponse(headers, csvRows, "ward_criticality.csv");
+      }
+
+      if (url.pathname === "/api/indicators/wards") {
+        const rows = await sql`
+          SELECT *
+          FROM ward_groundwater_indicators
+          ORDER BY ward_no
+        `;
+
+        return json({
+          wards: rows.map(row => ({
+            wardNo: row.ward_no,
+            wardName: row.ward_name,
+            usableSensorCount: row.usable_sensor_count || 0,
+            waterSensorCount: row.water_sensor_count || 0,
+            dischargeSensorCount: row.discharge_sensor_count || 0,
+            latestMedianWaterLevelFt: row.latest_median_water_level_ft,
+            latestMedianDischargeLpm: row.latest_median_discharge_lpm,
+            waterLevelTrendFtPerYear: row.water_level_trend_ft_per_year,
+            dischargeTrendLpmPerYear: row.discharge_trend_lpm_per_year,
+            rainfallResponseFt: row.rainfall_response_ft,
+            rainyEventCount: row.rainy_event_count || 0,
+            firstDataAt: row.first_data_at,
+            lastDataAt: row.last_data_at,
             updatedAt: row.updated_at
           })),
           count: rows.length
