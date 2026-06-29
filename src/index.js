@@ -1012,10 +1012,10 @@ export default {
           SELECT *
           FROM ward_groundwater_indicators
           WHERE water_level_trend_ft_per_month IS NOT NULL
-             OR water_level_trend_ft_per_year IS NOT NULL
+             OR water_level_trend_ft_per_week IS NOT NULL
           ORDER BY
             water_level_trend_ft_per_month DESC NULLS LAST,
-            water_level_trend_ft_per_year DESC NULLS LAST,
+            water_level_trend_ft_per_week DESC NULLS LAST,
             usable_sensor_count DESC,
             ward_no
         `;
@@ -1025,13 +1025,11 @@ export default {
           "ward_name",
           "gw_loss_ft_per_week",
           "gw_loss_ft_per_month",
-          "gw_loss_ft_per_year",
           "usable_sensor_count",
           "water_sensor_count",
           "latest_median_water_level_ft",
           "discharge_trend_lpm_per_week",
           "discharge_trend_lpm_per_month",
-          "discharge_trend_lpm_per_year",
           "latest_median_discharge_lpm",
           "first_data_at",
           "last_data_at"
@@ -1042,13 +1040,11 @@ export default {
           row.ward_name,
           row.water_level_trend_ft_per_week,
           row.water_level_trend_ft_per_month,
-          row.water_level_trend_ft_per_year,
           row.usable_sensor_count,
           row.water_sensor_count,
           row.latest_median_water_level_ft,
           row.discharge_trend_lpm_per_week,
           row.discharge_trend_lpm_per_month,
-          row.discharge_trend_lpm_per_year,
           row.latest_median_discharge_lpm,
           row.first_data_at,
           row.last_data_at
