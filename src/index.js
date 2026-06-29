@@ -1009,10 +1009,22 @@ export default {
 
       if (url.pathname === "/api/groundwater-loss/wards.csv") {
         const rows = await sql`
-          SELECT *
-          FROM ward_groundwater_indicators
-          WHERE water_level_trend_ft_per_month IS NOT NULL
-             OR water_level_trend_ft_per_week IS NOT NULL
+          WITH sensor_uids AS (
+            SELECT
+              ward_no,
+              STRING_AGG(uid, '; ' ORDER BY uid) AS sensor_uids,
+              COUNT(*) AS assigned_sensor_count
+            FROM sensor_ward_assignments
+            WHERE ward_no IS NOT NULL AND ward_no <> ''
+            GROUP BY ward_no
+          )
+          SELECT
+            gw.*,
+            COALESCE(sensor_uids.sensor_uids, '') AS sensor_uids,
+            COALESCE(sensor_uids.assigned_sensor_count, 0) AS assigned_sensor_count
+          FROM ward_groundwater_indicators gw
+          LEFT JOIN sensor_uids ON sensor_uids.ward_no = gw.ward_no
+          WHERE sensor_uids.assigned_sensor_count > 0
           ORDER BY
             water_level_trend_ft_per_month DESC NULLS LAST,
             water_level_trend_ft_per_week DESC NULLS LAST,
@@ -1025,6 +1037,8 @@ export default {
           "ward_name",
           "gw_loss_ft_per_week",
           "gw_loss_ft_per_month",
+          "sensor_uids",
+          "assigned_sensor_count",
           "usable_sensor_count",
           "water_sensor_count",
           "latest_median_water_level_ft",
@@ -1040,6 +1054,8 @@ export default {
           row.ward_name,
           row.water_level_trend_ft_per_week,
           row.water_level_trend_ft_per_month,
+          row.sensor_uids,
+          row.assigned_sensor_count,
           row.usable_sensor_count,
           row.water_sensor_count,
           row.latest_median_water_level_ft,
@@ -1054,9 +1070,21 @@ export default {
 
       if (url.pathname === "/api/indicators/wards") {
         const rows = await sql`
-          SELECT *
-          FROM ward_groundwater_indicators
-          ORDER BY ward_no
+          WITH recent_rainfall AS (
+            SELECT
+              ward_no,
+              SUM(rainfall_mm) AS recent_90_day_rainfall_mm
+            FROM ward_daily_rainfall
+            WHERE date >= CURRENT_DATE - INTERVAL '90 days'
+              AND source = 'CHIRPS'
+            GROUP BY ward_no
+          )
+          SELECT
+            gw.*,
+            recent_rainfall.recent_90_day_rainfall_mm
+          FROM ward_groundwater_indicators gw
+          LEFT JOIN recent_rainfall ON recent_rainfall.ward_no = gw.ward_no
+          ORDER BY gw.ward_no
         `;
 
         return json({
@@ -1074,6 +1102,7 @@ export default {
             dischargeTrendLpmPerWeek: row.discharge_trend_lpm_per_week,
             dischargeTrendLpmPerMonth: row.discharge_trend_lpm_per_month,
             dischargeTrendLpmPerYear: row.discharge_trend_lpm_per_year,
+            recent90DayRainfallMm: row.recent_90_day_rainfall_mm,
             rainfallResponseFt: row.rainfall_response_ft,
             rainyEventCount: row.rainy_event_count || 0,
             firstDataAt: row.first_data_at,
