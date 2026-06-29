@@ -919,7 +919,11 @@ export default {
             recent90DayRainfallMm: row.recent_90_day_rainfall_mm,
             latestMedianWaterLevelFt: row.latest_median_water_level_ft,
             latestMedianDischargeLpm: row.latest_median_discharge_lpm,
+            waterLevelTrendFtPerWeek: row.water_level_trend_ft_per_week,
+            waterLevelTrendFtPerMonth: row.water_level_trend_ft_per_month,
             waterLevelTrendFtPerYear: row.water_level_trend_ft_per_year,
+            dischargeTrendLpmPerWeek: row.discharge_trend_lpm_per_week,
+            dischargeTrendLpmPerMonth: row.discharge_trend_lpm_per_month,
             dischargeTrendLpmPerYear: row.discharge_trend_lpm_per_year,
             rainfallResponseFt: row.rainfall_response_ft,
             rainyEventCount: row.rainy_event_count || 0,
@@ -957,7 +961,11 @@ export default {
           "recent_90_day_rainfall_mm",
           "latest_median_water_level_ft",
           "latest_median_discharge_lpm",
+          "water_level_trend_ft_per_week",
+          "water_level_trend_ft_per_month",
           "water_level_trend_ft_per_year",
+          "discharge_trend_lpm_per_week",
+          "discharge_trend_lpm_per_month",
           "discharge_trend_lpm_per_year",
           "rainfall_response_ft",
           "rainy_event_count",
@@ -981,7 +989,11 @@ export default {
           row.recent_90_day_rainfall_mm,
           row.latest_median_water_level_ft,
           row.latest_median_discharge_lpm,
+          row.water_level_trend_ft_per_week,
+          row.water_level_trend_ft_per_month,
           row.water_level_trend_ft_per_year,
+          row.discharge_trend_lpm_per_week,
+          row.discharge_trend_lpm_per_month,
           row.discharge_trend_lpm_per_year,
           row.rainfall_response_ft,
           row.rainy_event_count,
@@ -993,6 +1005,55 @@ export default {
           Array.isArray(row.reasons) ? row.reasons.join("; ") : ""
         ]);
         return csvResponse(headers, csvRows, "ward_criticality.csv");
+      }
+
+      if (url.pathname === "/api/groundwater-loss/wards.csv") {
+        const rows = await sql`
+          SELECT *
+          FROM ward_groundwater_indicators
+          WHERE water_level_trend_ft_per_month IS NOT NULL
+             OR water_level_trend_ft_per_year IS NOT NULL
+          ORDER BY
+            water_level_trend_ft_per_month DESC NULLS LAST,
+            water_level_trend_ft_per_year DESC NULLS LAST,
+            usable_sensor_count DESC,
+            ward_no
+        `;
+        const headers = [
+          "rank",
+          "ward_no",
+          "ward_name",
+          "gw_loss_ft_per_week",
+          "gw_loss_ft_per_month",
+          "gw_loss_ft_per_year",
+          "usable_sensor_count",
+          "water_sensor_count",
+          "latest_median_water_level_ft",
+          "discharge_trend_lpm_per_week",
+          "discharge_trend_lpm_per_month",
+          "discharge_trend_lpm_per_year",
+          "latest_median_discharge_lpm",
+          "first_data_at",
+          "last_data_at"
+        ];
+        const csvRows = rows.map((row, index) => [
+          index + 1,
+          row.ward_no,
+          row.ward_name,
+          row.water_level_trend_ft_per_week,
+          row.water_level_trend_ft_per_month,
+          row.water_level_trend_ft_per_year,
+          row.usable_sensor_count,
+          row.water_sensor_count,
+          row.latest_median_water_level_ft,
+          row.discharge_trend_lpm_per_week,
+          row.discharge_trend_lpm_per_month,
+          row.discharge_trend_lpm_per_year,
+          row.latest_median_discharge_lpm,
+          row.first_data_at,
+          row.last_data_at
+        ]);
+        return csvResponse(headers, csvRows, "groundwater_loss_ward_ranking.csv");
       }
 
       if (url.pathname === "/api/indicators/wards") {
@@ -1011,7 +1072,11 @@ export default {
             dischargeSensorCount: row.discharge_sensor_count || 0,
             latestMedianWaterLevelFt: row.latest_median_water_level_ft,
             latestMedianDischargeLpm: row.latest_median_discharge_lpm,
+            waterLevelTrendFtPerWeek: row.water_level_trend_ft_per_week,
+            waterLevelTrendFtPerMonth: row.water_level_trend_ft_per_month,
             waterLevelTrendFtPerYear: row.water_level_trend_ft_per_year,
+            dischargeTrendLpmPerWeek: row.discharge_trend_lpm_per_week,
+            dischargeTrendLpmPerMonth: row.discharge_trend_lpm_per_month,
             dischargeTrendLpmPerYear: row.discharge_trend_lpm_per_year,
             rainfallResponseFt: row.rainfall_response_ft,
             rainyEventCount: row.rainy_event_count || 0,
