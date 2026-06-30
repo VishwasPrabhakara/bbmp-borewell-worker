@@ -49,6 +49,15 @@ function htmlEscape(value) {
     .replace(/"/g, "&quot;");
 }
 
+function xmlEscape(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
 function monthLabel(year, monthNumber) {
   const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   return `${months[Number(monthNumber) - 1]}-${String(year).slice(-2)}`;
@@ -58,6 +67,304 @@ function waterLevelCell(value) {
   if (value === null || value === undefined || value === "") return "";
   const numberValue = Number(value);
   return Number.isFinite(numberValue) ? Math.round(numberValue * 100) / 100 : value;
+}
+
+function median(values) {
+  const sorted = values.filter(value => Number.isFinite(value)).sort((a, b) => a - b);
+  if (!sorted.length) return null;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+function roundNumber(value, decimals = 4) {
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue)) return null;
+  const factor = 10 ** decimals;
+  return Math.round(numberValue * factor) / factor;
+}
+
+function weeklyLabel(year, monthNumber, weekNumber) {
+  return `${monthLabel(year, monthNumber)} W${weekNumber}`;
+}
+
+function dropPerDay(points) {
+  const available = points
+    .filter(point => Number.isFinite(point.level))
+    .sort((a, b) => a.position - b.position);
+  const drops = [];
+  for (let index = 0; index < available.length - 1; index += 1) {
+    const current = available[index];
+    const next = available[index + 1];
+    const days = (next.position - current.position) * 7;
+    if (days > 0) drops.push((next.level - current.level) / days);
+  }
+  return drops.length ? roundNumber(drops.reduce((sum, value) => sum + value, 0) / drops.length, 4) : null;
+}
+
+function weeklyWardPayload(rows, qcRows) {
+  const weekMap = new Map();
+  const sensorMap = new Map();
+  const wardMap = new Map();
+
+  for (const row of rows) {
+    const year = Number(row.year);
+    const monthNumber = Number(row.month_number);
+    const weekNumber = Number(row.week_number);
+    const weekKey = `${year}-${String(monthNumber).padStart(2, "0")}-${weekNumber}`;
+    if (!weekMap.has(weekKey)) {
+      weekMap.set(weekKey, {
+        key: weekKey,
+        year,
+        monthNumber,
+        weekNumber,
+        label: weeklyLabel(year, monthNumber, weekNumber),
+        position: weekMap.size
+      });
+    }
+
+    const wardKey = String(row.ward_no);
+    if (!wardMap.has(wardKey)) {
+      wardMap.set(wardKey, {
+        wardNo: row.ward_no,
+        wardName: row.ward_name,
+        totalSensors: 0,
+        goodSensors: 0,
+        notUsableSensors: 0,
+        goodPercent: 0,
+        avgDropPerDay: null,
+        uidCount: 0,
+        weekly: [],
+        sensors: []
+      });
+    }
+
+    const sensorKey = String(row.uid);
+    if (!sensorMap.has(sensorKey)) {
+      sensorMap.set(sensorKey, {
+        uid: sensorKey,
+        wardNo: row.ward_no,
+        wardName: row.ward_name,
+        dropPerDay: null,
+        pointsByWeek: new Map()
+      });
+    }
+    sensorMap.get(sensorKey).pointsByWeek.set(weekKey, roundNumber(row.water_level_ft, 2));
+  }
+
+  for (const row of qcRows) {
+    const wardKey = String(row.ward_no);
+    if (!wardMap.has(wardKey)) {
+      wardMap.set(wardKey, {
+        wardNo: row.ward_no,
+        wardName: row.ward_name,
+        totalSensors: 0,
+        goodSensors: 0,
+        notUsableSensors: 0,
+        goodPercent: 0,
+        avgDropPerDay: null,
+        uidCount: 0,
+        weekly: [],
+        sensors: []
+      });
+    }
+    const ward = wardMap.get(wardKey);
+    ward.totalSensors += 1;
+    if (row.qc_status === "GOOD") ward.goodSensors += 1;
+  }
+
+  const weeks = Array.from(weekMap.values()).sort((a, b) => {
+    if (a.year !== b.year) return a.year - b.year;
+    if (a.monthNumber !== b.monthNumber) return a.monthNumber - b.monthNumber;
+    return a.weekNumber - b.weekNumber;
+  });
+  weeks.forEach((week, index) => { week.position = index; });
+
+  const sensors = Array.from(sensorMap.values()).map(sensor => {
+    const points = weeks.map(week => ({
+      key: week.key,
+      label: week.label,
+      position: week.position,
+      level: sensor.pointsByWeek.get(week.key) ?? null
+    }));
+    return {
+      uid: sensor.uid,
+      wardNo: sensor.wardNo,
+      wardName: sensor.wardName,
+      dropPerDay: dropPerDay(points),
+      points: points.map(({ label, level }) => ({ label, level }))
+    };
+  });
+
+  for (const sensor of sensors) {
+    const ward = wardMap.get(String(sensor.wardNo));
+    if (ward) ward.sensors.push(sensor);
+  }
+
+  for (const ward of wardMap.values()) {
+    ward.notUsableSensors = Math.max(ward.totalSensors - ward.goodSensors, 0);
+    ward.goodPercent = ward.totalSensors ? roundNumber((ward.goodSensors / ward.totalSensors) * 100, 1) : 0;
+    ward.uidCount = ward.sensors.length;
+    const wardDrops = ward.sensors.map(sensor => sensor.dropPerDay).filter(value => Number.isFinite(value));
+    ward.avgDropPerDay = wardDrops.length ? roundNumber(wardDrops.reduce((sum, value) => sum + value, 0) / wardDrops.length, 4) : null;
+    ward.weekly = weeks.map(week => {
+      const values = ward.sensors
+        .map(sensor => sensor.points.find(point => point.label === week.label)?.level)
+        .filter(value => Number.isFinite(value));
+      return {
+        label: week.label,
+        averageLevel: values.length ? roundNumber(values.reduce((sum, value) => sum + value, 0) / values.length, 2) : null,
+        medianLevel: median(values),
+        sensorCount: values.length
+      };
+    });
+    ward.sensors.sort((a, b) => String(a.uid).localeCompare(String(b.uid)));
+  }
+
+  return {
+    weeks: weeks.map(({ label }) => label),
+    wards: Array.from(wardMap.values()).sort((a, b) => Number(a.wardNo) - Number(b.wardNo))
+  };
+}
+
+const CRC32_TABLE = new Uint32Array(256).map((_, index) => {
+  let value = index;
+  for (let bit = 0; bit < 8; bit += 1) {
+    value = (value & 1) ? (0xedb88320 ^ (value >>> 1)) : (value >>> 1);
+  }
+  return value >>> 0;
+});
+
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc = CRC32_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function stringBytes(value) {
+  return new TextEncoder().encode(value);
+}
+
+function concatBytes(parts) {
+  const length = parts.reduce((sum, part) => sum + part.length, 0);
+  const result = new Uint8Array(length);
+  let offset = 0;
+  for (const part of parts) {
+    result.set(part, offset);
+    offset += part.length;
+  }
+  return result;
+}
+
+function u16(value) {
+  return new Uint8Array([value & 0xff, (value >>> 8) & 0xff]);
+}
+
+function u32(value) {
+  return new Uint8Array([
+    value & 0xff,
+    (value >>> 8) & 0xff,
+    (value >>> 16) & 0xff,
+    (value >>> 24) & 0xff
+  ]);
+}
+
+function zipDateTime() {
+  const now = new Date();
+  const time = (now.getHours() << 11) | (now.getMinutes() << 5) | Math.floor(now.getSeconds() / 2);
+  const date = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+  return { time, date };
+}
+
+function makeZip(files) {
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+  const { time, date } = zipDateTime();
+
+  for (const file of files) {
+    const nameBytes = stringBytes(file.name);
+    const dataBytes = typeof file.data === "string" ? stringBytes(file.data) : file.data;
+    const checksum = crc32(dataBytes);
+
+    const localHeader = concatBytes([
+      u32(0x04034b50),
+      u16(20),
+      u16(0x0800),
+      u16(0),
+      u16(time),
+      u16(date),
+      u32(checksum),
+      u32(dataBytes.length),
+      u32(dataBytes.length),
+      u16(nameBytes.length),
+      u16(0),
+      nameBytes
+    ]);
+    localParts.push(localHeader, dataBytes);
+
+    const centralHeader = concatBytes([
+      u32(0x02014b50),
+      u16(20),
+      u16(20),
+      u16(0x0800),
+      u16(0),
+      u16(time),
+      u16(date),
+      u32(checksum),
+      u32(dataBytes.length),
+      u32(dataBytes.length),
+      u16(nameBytes.length),
+      u16(0),
+      u16(0),
+      u16(0),
+      u16(0),
+      u32(0),
+      u32(offset),
+      nameBytes
+    ]);
+    centralParts.push(centralHeader);
+    offset += localHeader.length + dataBytes.length;
+  }
+
+  const centralDirectory = concatBytes(centralParts);
+  const endRecord = concatBytes([
+    u32(0x06054b50),
+    u16(0),
+    u16(0),
+    u16(files.length),
+    u16(files.length),
+    u32(centralDirectory.length),
+    u32(offset),
+    u16(0)
+  ]);
+
+  return concatBytes([...localParts, centralDirectory, endRecord]);
+}
+
+function columnName(index) {
+  let name = "";
+  while (index > 0) {
+    const remainder = (index - 1) % 26;
+    name = String.fromCharCode(65 + remainder) + name;
+    index = Math.floor((index - 1) / 26);
+  }
+  return name;
+}
+
+function cellAddress(row, column) {
+  return `${columnName(column)}${row}`;
+}
+
+function inlineCell(row, column, value, style = 3) {
+  if (value === null || value === undefined || value === "") return "";
+  return `<c r="${cellAddress(row, column)}" s="${style}" t="inlineStr"><is><t>${xmlEscape(value)}</t></is></c>`;
+}
+
+function numberCell(row, column, value, style = 4) {
+  if (value === null || value === undefined || value === "") return "";
+  return `<c r="${cellAddress(row, column)}" s="${style}"><v>${xmlEscape(value)}</v></c>`;
 }
 
 function weeklyLevelsExcelResponse(rows, filename) {
@@ -88,10 +395,12 @@ function weeklyLevelsExcelResponse(rows, filename) {
     sensorMap.get(sensorKey).months.set(monthKey, row);
   }
 
-  const months = Array.from(monthMap.values()).sort((a, b) => {
-    if (a.year !== b.year) return a.year - b.year;
-    return a.monthNumber - b.monthNumber;
-  });
+  const months = Array.from(monthMap.values())
+    .filter(month => month.year > 2026 || (month.year === 2026 && month.monthNumber >= 1))
+    .sort((a, b) => {
+      if (a.year !== b.year) return a.year - b.year;
+      return a.monthNumber - b.monthNumber;
+    });
 
   const sensors = Array.from(sensorMap.values()).sort((a, b) => {
     const wardA = Number(a.wardNo);
@@ -102,8 +411,6 @@ function weeklyLevelsExcelResponse(rows, filename) {
       || String(a.uid).localeCompare(String(b.uid));
   });
 
-  const headerMonths = months.map(month => `<th colspan="4">${htmlEscape(month.label)}</th>`).join("");
-  const headerWeeks = months.map(() => "<th>Week 1</th><th>Week 2</th><th>Week 3</th><th>Week 4</th>").join("");
   const wardSpans = new Map();
   for (let index = 0; index < sensors.length; index += 1) {
     const sensor = sensors[index];
@@ -114,64 +421,125 @@ function weeklyLevelsExcelResponse(rows, filename) {
     wardSpans.get(wardKey).count += 1;
   }
 
-  const bodyRows = sensors.map((sensor, index) => {
+  const merges = ["A1:A2", "B1:B2", "C1:C2"];
+  const sheetRows = [];
+  const firstRowCells = [
+    inlineCell(1, 1, "Ward Num", 1),
+    inlineCell(1, 2, "Ward Name", 1),
+    inlineCell(1, 3, "UID", 1)
+  ];
+  const secondRowCells = [];
+  let column = 4;
+  for (const month of months) {
+    firstRowCells.push(inlineCell(1, column, month.label, 2));
+    merges.push(`${cellAddress(1, column)}:${cellAddress(1, column + 3)}`);
+    for (let week = 1; week <= 4; week += 1) {
+      secondRowCells.push(inlineCell(2, column, `Week ${week}`, 2));
+      column += 1;
+    }
+  }
+  sheetRows.push(`<row r="1">${firstRowCells.join("")}</row>`);
+  sheetRows.push(`<row r="2">${secondRowCells.join("")}</row>`);
+
+  sensors.forEach((sensor, index) => {
     const wardKey = `${sensor.wardNo || ""}|${sensor.wardName || ""}`;
     const wardSpan = wardSpans.get(wardKey);
-    const wardCells = wardSpan.start === index
-      ? `
-        <td rowspan="${wardSpan.count}" class="fixed-cell">${htmlEscape(sensor.wardNo)}</td>
-        <td rowspan="${wardSpan.count}" class="fixed-cell">${htmlEscape(sensor.wardName)}</td>`
-      : "";
-    const monthCells = months.map(month => {
+    const rowNumber = index + 3;
+    const cells = [];
+    if (wardSpan.start === index) {
+      cells.push(inlineCell(rowNumber, 1, sensor.wardNo, 5));
+      cells.push(inlineCell(rowNumber, 2, sensor.wardName, 5));
+      if (wardSpan.count > 1) {
+        merges.push(`A${rowNumber}:A${rowNumber + wardSpan.count - 1}`);
+        merges.push(`B${rowNumber}:B${rowNumber + wardSpan.count - 1}`);
+      }
+    }
+    cells.push(inlineCell(rowNumber, 3, sensor.uid, 6));
+    let dataColumn = 4;
+    for (const month of months) {
       const row = sensor.months.get(month.key) || {};
-      return [1, 2, 3, 4].map(week => {
+      for (let week = 1; week <= 4; week += 1) {
         const value = waterLevelCell(row[`week_${week}_start_water_level_ft`]);
-        return `<td class="number">${htmlEscape(value)}</td>`;
-      }).join("");
-    }).join("");
+        cells.push(numberCell(rowNumber, dataColumn, value, 4));
+        dataColumn += 1;
+      }
+    }
+    sheetRows.push(`<row r="${rowNumber}">${cells.join("")}</row>`);
+  });
 
-    return `
-      <tr>
-        ${wardCells}
-        <td class="text">${htmlEscape(sensor.uid)}</td>
-        ${monthCells}
-      </tr>`;
-  }).join("");
+  const mergeXml = merges.length
+    ? `<mergeCells count="${merges.length}">${merges.map(ref => `<mergeCell ref="${ref}"/>`).join("")}</mergeCells>`
+    : "";
+  const maxColumn = 3 + (months.length * 4);
+  const cols = [
+    '<col min="1" max="1" width="12" customWidth="1"/>',
+    '<col min="2" max="2" width="24" customWidth="1"/>',
+    '<col min="3" max="3" width="20" customWidth="1"/>',
+    maxColumn >= 4 ? `<col min="4" max="${maxColumn}" width="11" customWidth="1"/>` : ""
+  ].join("");
 
-  const htmlTable = `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <style>
-    table { border-collapse: collapse; font-family: Calibri, Arial, sans-serif; font-size: 11pt; }
-    th, td { border: 1px solid #9ca3af; padding: 5px 8px; white-space: nowrap; }
-    th { background: #d9e2f3; font-weight: 700; text-align: center; }
-    td { background: #ffffff; }
-    .fixed { background: #e7e6e6; }
-    .fixed-cell { background: #f3f4f6; vertical-align: middle; }
-    .text { mso-number-format: "\\@"; }
-    .number { mso-number-format: "0.00"; text-align: right; }
-  </style>
-</head>
-<body>
-  <table>
-    <thead>
-      <tr>
-        <th class="fixed" rowspan="2">Ward Num</th>
-        <th class="fixed" rowspan="2">Ward Name</th>
-        <th class="fixed" rowspan="2">UID</th>
-        ${headerMonths}
-      </tr>
-      <tr>${headerWeeks}</tr>
-    </thead>
-    <tbody>${bodyRows}</tbody>
-  </table>
-</body>
-</html>`;
+  const worksheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <dimension ref="A1:${cellAddress(Math.max(2, sensors.length + 2), Math.max(3, maxColumn))}"/>
+  <sheetViews><sheetView workbookViewId="0"><pane xSplit="3" ySplit="2" topLeftCell="D3" activePane="bottomRight" state="frozen"/></sheetView></sheetViews>
+  <cols>${cols}</cols>
+  <sheetData>${sheetRows.join("")}</sheetData>
+  ${mergeXml}
+</worksheet>`;
 
-  return new Response(htmlTable, {
+  const workbook = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets><sheet name="Weekly Start Levels" sheetId="1" r:id="rId1"/></sheets>
+</workbook>`;
+
+  const styles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts>
+  <fills count="4"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE7E6E6"/><bgColor indexed="64"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFD9E2F3"/><bgColor indexed="64"/></patternFill></fill></fills>
+  <borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border><border><left style="thin"><color rgb="FF9CA3AF"/></left><right style="thin"><color rgb="FF9CA3AF"/></right><top style="thin"><color rgb="FF9CA3AF"/></top><bottom style="thin"><color rgb="FF9CA3AF"/></bottom><diagonal/></border></borders>
+  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="7">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>
+    <xf numFmtId="0" fontId="1" fillId="2" borderId="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+    <xf numFmtId="0" fontId="1" fillId="3" borderId="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="1" applyBorder="1"/>
+    <xf numFmtId="2" fontId="0" fillId="0" borderId="1" applyNumberFormat="1" applyBorder="1" applyAlignment="1"><alignment horizontal="right" vertical="center"/></xf>
+    <xf numFmtId="0" fontId="0" fillId="2" borderId="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+    <xf numFmtId="49" fontId="0" fillId="0" borderId="1" applyNumberFormat="1" applyBorder="1"/>
+  </cellXfs>
+  <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
+</styleSheet>`;
+
+  const zip = makeZip([
+    {
+      name: "[Content_Types].xml",
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`
+    },
+    {
+      name: "_rels/.rels",
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`
+    },
+    {
+      name: "xl/workbook.xml",
+      data: workbook
+    },
+    {
+      name: "xl/_rels/workbook.xml.rels",
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`
+    },
+    {
+      name: "xl/worksheets/sheet1.xml",
+      data: worksheet
+    },
+    {
+      name: "xl/styles.xml",
+      data: styles
+    }
+  ]);
+
+  return new Response(zip, {
     headers: {
-      "content-type": "application/vnd.ms-excel; charset=utf-8",
+      "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       "content-disposition": `attachment; filename="${filename}"`,
       "access-control-allow-origin": "*"
     }
@@ -1000,6 +1368,18 @@ export default {
               AVG(consumption_per_connection) AS avg_consumption_per_connection
             FROM ward_monthly_consumption
             GROUP BY normalized_ward_name
+          ),
+          yearly AS (
+            SELECT
+              normalized_ward_name,
+              SUM(consumption_ml) FILTER (WHERE EXTRACT(YEAR FROM month) = 2025) AS consumption_2025_ml,
+              SUM(consumption_ml) FILTER (WHERE EXTRACT(YEAR FROM month) = 2026) AS consumption_2026_ml,
+              MAX(connections) FILTER (WHERE EXTRACT(YEAR FROM month) = 2025) AS connections_2025,
+              MAX(connections) FILTER (WHERE EXTRACT(YEAR FROM month) = 2026) AS connections_2026,
+              AVG(consumption_per_connection) FILTER (WHERE EXTRACT(YEAR FROM month) = 2025) AS cpc_2025,
+              AVG(consumption_per_connection) FILTER (WHERE EXTRACT(YEAR FROM month) = 2026) AS cpc_2026
+            FROM ward_monthly_consumption
+            GROUP BY normalized_ward_name
           )
           SELECT
             latest.ward_name,
@@ -1012,9 +1392,16 @@ export default {
             summary.last_month,
             summary.month_count,
             summary.avg_consumption_ml,
-            summary.avg_consumption_per_connection
+            summary.avg_consumption_per_connection,
+            yearly.consumption_2025_ml,
+            yearly.consumption_2026_ml,
+            yearly.connections_2025,
+            yearly.connections_2026,
+            yearly.cpc_2025,
+            yearly.cpc_2026
           FROM latest
           JOIN summary USING (normalized_ward_name)
+          LEFT JOIN yearly USING (normalized_ward_name)
           ORDER BY latest.ward_name
         `;
 
@@ -1030,7 +1417,13 @@ export default {
             lastMonth: row.last_month,
             monthCount: row.month_count || 0,
             avgConsumptionMl: row.avg_consumption_ml || 0,
-            avgConsumptionPerConnection: row.avg_consumption_per_connection || 0
+            avgConsumptionPerConnection: row.avg_consumption_per_connection || 0,
+            consumption2025Ml: row.consumption_2025_ml,
+            consumption2026Ml: row.consumption_2026_ml,
+            connections2025: row.connections_2025,
+            connections2026: row.connections_2026,
+            consumptionPerConnection2025: row.cpc_2025,
+            consumptionPerConnection2026: row.cpc_2026
           })),
           count: rows.length
         });
@@ -1200,7 +1593,8 @@ export default {
       }
 
       if (
-        url.pathname === "/api/good-sensor-weekly-start-levels.xls"
+        url.pathname === "/api/good-sensor-weekly-start-levels.xlsx"
+        || url.pathname === "/api/good-sensor-weekly-start-levels.xls"
         || url.pathname === "/api/good-sensor-weekly-start-levels.csv"
       ) {
         const rows = await sql`
@@ -1299,7 +1693,143 @@ export default {
           ORDER BY year DESC, month_number DESC, ward_no, ward_name, uid
         `;
 
-        return weeklyLevelsExcelResponse(rows, "good_sensor_weekly_start_levels.xls");
+        return weeklyLevelsExcelResponse(rows, "good_sensor_weekly_start_levels.xlsx");
+      }
+
+      if (url.pathname === "/api/ward-weekly-levels") {
+        const wardNo = url.searchParams.get("ward_no");
+        const qcRows = wardNo ? await sql`
+          SELECT uid, ward_no, ward_name, qc_status
+          FROM sensor_qc_summary
+          WHERE ward_no = ${wardNo}
+        ` : await sql`
+          SELECT uid, ward_no, ward_name, qc_status
+          FROM sensor_qc_summary
+          WHERE ward_no IS NOT NULL
+            AND ward_no <> ''
+        `;
+        const rows = wardNo ? await sql`
+          WITH good_sensors AS (
+            SELECT uid, ward_no, ward_name
+            FROM sensor_qc_summary
+            WHERE qc_status = 'GOOD'
+              AND ward_no = ${wardNo}
+          ),
+          uploaded_uids AS (
+            SELECT DISTINCT uid FROM uploaded_type_b_sessions
+          ),
+          type_b_points AS (
+            SELECT q.ward_no, q.ward_name, q.uid, b.start_time AS time, b.water_level_start_ft AS water_level_ft
+            FROM uploaded_type_b_sessions b
+            JOIN good_sensors q ON q.uid = b.uid
+            WHERE b.water_level_start_ft IS NOT NULL
+            UNION ALL
+            SELECT q.ward_no, q.ward_name, q.uid, b.stop_time AS time, b.water_level_stop_ft AS water_level_ft
+            FROM uploaded_type_b_sessions b
+            JOIN good_sensors q ON q.uid = b.uid
+            WHERE b.water_level_stop_ft IS NOT NULL
+          ),
+          kh_points AS (
+            SELECT q.ward_no, q.ward_name, q.uid, w.time, COALESCE(w.water_level, w.on_level, w.off_level) AS water_level_ft
+            FROM water_levels w
+            JOIN good_sensors q ON q.uid = w.uid
+            WHERE q.uid NOT IN (SELECT uid FROM uploaded_uids)
+              AND COALESCE(w.water_level, w.on_level, w.off_level) IS NOT NULL
+          ),
+          keyed AS (
+            SELECT
+              ward_no,
+              ward_name,
+              uid,
+              EXTRACT(YEAR FROM time)::integer AS year,
+              EXTRACT(MONTH FROM time)::integer AS month_number,
+              LEAST((((EXTRACT(DAY FROM time)::integer - 1) / 7) + 1), 4)::integer AS week_number,
+              time AS reading_time,
+              water_level_ft
+            FROM (
+              SELECT * FROM type_b_points
+              UNION ALL
+              SELECT * FROM kh_points
+            ) points
+            WHERE time >= DATE '2026-01-01'
+          ),
+          first_readings AS (
+            SELECT *,
+              ROW_NUMBER() OVER (
+                PARTITION BY uid, year, month_number, week_number
+                ORDER BY reading_time ASC
+              ) AS reading_rank
+            FROM keyed
+          )
+          SELECT ward_no, ward_name, uid, year, month_number, week_number, reading_time, water_level_ft
+          FROM first_readings
+          WHERE reading_rank = 1
+          ORDER BY year, month_number, week_number, ward_no, uid
+        ` : await sql`
+          WITH good_sensors AS (
+            SELECT uid, ward_no, ward_name
+            FROM sensor_qc_summary
+            WHERE qc_status = 'GOOD'
+              AND ward_no IS NOT NULL
+              AND ward_no <> ''
+          ),
+          uploaded_uids AS (
+            SELECT DISTINCT uid FROM uploaded_type_b_sessions
+          ),
+          type_b_points AS (
+            SELECT q.ward_no, q.ward_name, q.uid, b.start_time AS time, b.water_level_start_ft AS water_level_ft
+            FROM uploaded_type_b_sessions b
+            JOIN good_sensors q ON q.uid = b.uid
+            WHERE b.water_level_start_ft IS NOT NULL
+            UNION ALL
+            SELECT q.ward_no, q.ward_name, q.uid, b.stop_time AS time, b.water_level_stop_ft AS water_level_ft
+            FROM uploaded_type_b_sessions b
+            JOIN good_sensors q ON q.uid = b.uid
+            WHERE b.water_level_stop_ft IS NOT NULL
+          ),
+          kh_points AS (
+            SELECT q.ward_no, q.ward_name, q.uid, w.time, COALESCE(w.water_level, w.on_level, w.off_level) AS water_level_ft
+            FROM water_levels w
+            JOIN good_sensors q ON q.uid = w.uid
+            WHERE q.uid NOT IN (SELECT uid FROM uploaded_uids)
+              AND COALESCE(w.water_level, w.on_level, w.off_level) IS NOT NULL
+          ),
+          keyed AS (
+            SELECT
+              ward_no,
+              ward_name,
+              uid,
+              EXTRACT(YEAR FROM time)::integer AS year,
+              EXTRACT(MONTH FROM time)::integer AS month_number,
+              LEAST((((EXTRACT(DAY FROM time)::integer - 1) / 7) + 1), 4)::integer AS week_number,
+              time AS reading_time,
+              water_level_ft
+            FROM (
+              SELECT * FROM type_b_points
+              UNION ALL
+              SELECT * FROM kh_points
+            ) points
+            WHERE time >= DATE '2026-01-01'
+          ),
+          first_readings AS (
+            SELECT *,
+              ROW_NUMBER() OVER (
+                PARTITION BY uid, year, month_number, week_number
+                ORDER BY reading_time ASC
+              ) AS reading_rank
+            FROM keyed
+          )
+          SELECT ward_no, ward_name, uid, year, month_number, week_number, reading_time, water_level_ft
+          FROM first_readings
+          WHERE reading_rank = 1
+          ORDER BY year, month_number, week_number, ward_no, uid
+        `;
+
+        const payload = weeklyWardPayload(rows, qcRows);
+        return json(wardNo ? {
+          ward: payload.wards.find(ward => String(ward.wardNo) === String(wardNo)) || null,
+          weeks: payload.weeks
+        } : payload);
       }
 
       if (url.pathname === "/api/indicators/wards") {
@@ -1438,6 +1968,10 @@ export default {
 
         if (url.pathname === "/api/qc/wards") {
           return json({ wards: [], count: 0 });
+        }
+
+        if (url.pathname === "/api/ward-weekly-levels") {
+          return json(url.searchParams.get("ward_no") ? { ward: null, weeks: [] } : { wards: [], weeks: [] });
         }
 
         if (url.pathname === "/api/water-level") {
