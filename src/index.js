@@ -1376,8 +1376,10 @@ export default {
               SUM(consumption_ml) FILTER (WHERE EXTRACT(YEAR FROM month) = 2026) AS consumption_2026_ml,
               MAX(connections) FILTER (WHERE EXTRACT(YEAR FROM month) = 2025) AS connections_2025,
               MAX(connections) FILTER (WHERE EXTRACT(YEAR FROM month) = 2026) AS connections_2026,
-              AVG(consumption_per_connection) FILTER (WHERE EXTRACT(YEAR FROM month) = 2025) AS cpc_2025,
-              AVG(consumption_per_connection) FILTER (WHERE EXTRACT(YEAR FROM month) = 2026) AS cpc_2026
+              SUM(consumption_ml) FILTER (WHERE EXTRACT(YEAR FROM month) = 2025)
+                / NULLIF(MAX(connections) FILTER (WHERE EXTRACT(YEAR FROM month) = 2025), 0) AS cpc_2025,
+              SUM(consumption_ml) FILTER (WHERE EXTRACT(YEAR FROM month) = 2026)
+                / NULLIF(MAX(connections) FILTER (WHERE EXTRACT(YEAR FROM month) = 2026), 0) AS cpc_2026
             FROM ward_monthly_consumption
             GROUP BY normalized_ward_name
           )
