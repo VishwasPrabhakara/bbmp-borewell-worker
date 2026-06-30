@@ -89,8 +89,8 @@ function weeklyLevelsExcelResponse(rows, filename) {
   }
 
   const months = Array.from(monthMap.values()).sort((a, b) => {
-    if (b.year !== a.year) return b.year - a.year;
-    return b.monthNumber - a.monthNumber;
+    if (a.year !== b.year) return a.year - b.year;
+    return a.monthNumber - b.monthNumber;
   });
 
   const sensors = Array.from(sensorMap.values()).sort((a, b) => {
@@ -104,7 +104,24 @@ function weeklyLevelsExcelResponse(rows, filename) {
 
   const headerMonths = months.map(month => `<th colspan="4">${htmlEscape(month.label)}</th>`).join("");
   const headerWeeks = months.map(() => "<th>Week 1</th><th>Week 2</th><th>Week 3</th><th>Week 4</th>").join("");
-  const bodyRows = sensors.map(sensor => {
+  const wardSpans = new Map();
+  for (let index = 0; index < sensors.length; index += 1) {
+    const sensor = sensors[index];
+    const wardKey = `${sensor.wardNo || ""}|${sensor.wardName || ""}`;
+    if (!wardSpans.has(wardKey)) {
+      wardSpans.set(wardKey, { start: index, count: 0 });
+    }
+    wardSpans.get(wardKey).count += 1;
+  }
+
+  const bodyRows = sensors.map((sensor, index) => {
+    const wardKey = `${sensor.wardNo || ""}|${sensor.wardName || ""}`;
+    const wardSpan = wardSpans.get(wardKey);
+    const wardCells = wardSpan.start === index
+      ? `
+        <td rowspan="${wardSpan.count}" class="fixed-cell">${htmlEscape(sensor.wardNo)}</td>
+        <td rowspan="${wardSpan.count}" class="fixed-cell">${htmlEscape(sensor.wardName)}</td>`
+      : "";
     const monthCells = months.map(month => {
       const row = sensor.months.get(month.key) || {};
       return [1, 2, 3, 4].map(week => {
@@ -115,8 +132,7 @@ function weeklyLevelsExcelResponse(rows, filename) {
 
     return `
       <tr>
-        <td>${htmlEscape(sensor.wardNo)}</td>
-        <td>${htmlEscape(sensor.wardName)}</td>
+        ${wardCells}
         <td class="text">${htmlEscape(sensor.uid)}</td>
         ${monthCells}
       </tr>`;
@@ -132,6 +148,7 @@ function weeklyLevelsExcelResponse(rows, filename) {
     th { background: #d9e2f3; font-weight: 700; text-align: center; }
     td { background: #ffffff; }
     .fixed { background: #e7e6e6; }
+    .fixed-cell { background: #f3f4f6; vertical-align: middle; }
     .text { mso-number-format: "\\@"; }
     .number { mso-number-format: "0.00"; text-align: right; }
   </style>
