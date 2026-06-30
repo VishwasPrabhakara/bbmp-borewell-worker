@@ -41,6 +41,126 @@ function csvResponse(headers, rows, filename) {
   });
 }
 
+function htmlEscape(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function monthLabel(year, monthNumber) {
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${months[Number(monthNumber) - 1]}-${String(year).slice(-2)}`;
+}
+
+function waterLevelCell(value) {
+  if (value === null || value === undefined || value === "") return "";
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) ? Math.round(numberValue * 100) / 100 : value;
+}
+
+function weeklyLevelsExcelResponse(rows, filename) {
+  const monthMap = new Map();
+  const sensorMap = new Map();
+
+  for (const row of rows) {
+    const monthKey = `${row.year}-${String(row.month_number).padStart(2, "0")}`;
+    if (!monthMap.has(monthKey)) {
+      monthMap.set(monthKey, {
+        key: monthKey,
+        year: Number(row.year),
+        monthNumber: Number(row.month_number),
+        label: monthLabel(row.year, row.month_number)
+      });
+    }
+
+    const sensorKey = String(row.uid);
+    if (!sensorMap.has(sensorKey)) {
+      sensorMap.set(sensorKey, {
+        wardNo: row.ward_no,
+        wardName: row.ward_name,
+        uid: sensorKey,
+        months: new Map()
+      });
+    }
+
+    sensorMap.get(sensorKey).months.set(monthKey, row);
+  }
+
+  const months = Array.from(monthMap.values()).sort((a, b) => {
+    if (b.year !== a.year) return b.year - a.year;
+    return b.monthNumber - a.monthNumber;
+  });
+
+  const sensors = Array.from(sensorMap.values()).sort((a, b) => {
+    const wardA = Number(a.wardNo);
+    const wardB = Number(b.wardNo);
+    if (Number.isFinite(wardA) && Number.isFinite(wardB) && wardA !== wardB) return wardA - wardB;
+    return String(a.wardNo).localeCompare(String(b.wardNo))
+      || String(a.wardName || "").localeCompare(String(b.wardName || ""))
+      || String(a.uid).localeCompare(String(b.uid));
+  });
+
+  const headerMonths = months.map(month => `<th colspan="4">${htmlEscape(month.label)}</th>`).join("");
+  const headerWeeks = months.map(() => "<th>Week 1</th><th>Week 2</th><th>Week 3</th><th>Week 4</th>").join("");
+  const bodyRows = sensors.map(sensor => {
+    const monthCells = months.map(month => {
+      const row = sensor.months.get(month.key) || {};
+      return [1, 2, 3, 4].map(week => {
+        const value = waterLevelCell(row[`week_${week}_start_water_level_ft`]);
+        return `<td class="number">${htmlEscape(value)}</td>`;
+      }).join("");
+    }).join("");
+
+    return `
+      <tr>
+        <td>${htmlEscape(sensor.wardNo)}</td>
+        <td>${htmlEscape(sensor.wardName)}</td>
+        <td class="text">${htmlEscape(sensor.uid)}</td>
+        ${monthCells}
+      </tr>`;
+  }).join("");
+
+  const htmlTable = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    table { border-collapse: collapse; font-family: Calibri, Arial, sans-serif; font-size: 11pt; }
+    th, td { border: 1px solid #9ca3af; padding: 5px 8px; white-space: nowrap; }
+    th { background: #d9e2f3; font-weight: 700; text-align: center; }
+    td { background: #ffffff; }
+    .fixed { background: #e7e6e6; }
+    .text { mso-number-format: "\\@"; }
+    .number { mso-number-format: "0.00"; text-align: right; }
+  </style>
+</head>
+<body>
+  <table>
+    <thead>
+      <tr>
+        <th class="fixed" rowspan="2">Ward Num</th>
+        <th class="fixed" rowspan="2">Ward Name</th>
+        <th class="fixed" rowspan="2">UID</th>
+        ${headerMonths}
+      </tr>
+      <tr>${headerWeeks}</tr>
+    </thead>
+    <tbody>${bodyRows}</tbody>
+  </table>
+</body>
+</html>`;
+
+  return new Response(htmlTable, {
+    headers: {
+      "content-type": "application/vnd.ms-excel; charset=utf-8",
+      "content-disposition": `attachment; filename="${filename}"`,
+      "access-control-allow-origin": "*"
+    }
+  });
+}
+
 function isStale(lastFinished) {
   if (!lastFinished) return true;
   const last = new Date(lastFinished).getTime();
@@ -1062,7 +1182,10 @@ export default {
         return csvResponse(headers, csvRows, "groundwater_loss_ward_ranking.csv");
       }
 
-      if (url.pathname === "/api/good-sensor-weekly-start-levels.csv") {
+      if (
+        url.pathname === "/api/good-sensor-weekly-start-levels.xls"
+        || url.pathname === "/api/good-sensor-weekly-start-levels.csv"
+      ) {
         const rows = await sql`
           WITH good_sensors AS (
             SELECT uid, ward_no, ward_name, qc_status
@@ -1124,7 +1247,7 @@ export default {
               EXTRACT(YEAR FROM time)::integer AS year,
               EXTRACT(MONTH FROM time)::integer AS month_number,
               TO_CHAR(DATE_TRUNC('month', time), 'YYYY-MM Mon') AS month,
-              LEAST((((EXTRACT(DAY FROM time)::integer - 1) / 7) + 1), 5)::integer AS week_number,
+              LEAST((((EXTRACT(DAY FROM time)::integer - 1) / 7) + 1), 4)::integer AS week_number,
               time AS reading_time,
               water_level_ft
             FROM points
@@ -1152,52 +1275,14 @@ export default {
             MAX(water_level_ft) FILTER (WHERE week_number = 3) AS week_3_start_water_level_ft,
             MAX(reading_time) FILTER (WHERE week_number = 3) AS week_3_reading_time,
             MAX(water_level_ft) FILTER (WHERE week_number = 4) AS week_4_start_water_level_ft,
-            MAX(reading_time) FILTER (WHERE week_number = 4) AS week_4_reading_time,
-            MAX(water_level_ft) FILTER (WHERE week_number = 5) AS week_5_start_water_level_ft,
-            MAX(reading_time) FILTER (WHERE week_number = 5) AS week_5_reading_time
+            MAX(reading_time) FILTER (WHERE week_number = 4) AS week_4_reading_time
           FROM first_readings
           WHERE reading_rank = 1
           GROUP BY ward_no, ward_name, uid, qc_status, year, month_number, month
           ORDER BY year DESC, month_number DESC, ward_no, ward_name, uid
         `;
 
-        const headers = [
-          "ward_no",
-          "ward_name",
-          "uid",
-          "qc_status",
-          "year",
-          "month",
-          "week_1_start_water_level_ft",
-          "week_1_reading_time",
-          "week_2_start_water_level_ft",
-          "week_2_reading_time",
-          "week_3_start_water_level_ft",
-          "week_3_reading_time",
-          "week_4_start_water_level_ft",
-          "week_4_reading_time",
-          "week_5_start_water_level_ft",
-          "week_5_reading_time"
-        ];
-        const csvRows = rows.map(row => [
-          row.ward_no,
-          row.ward_name,
-          row.uid,
-          row.qc_status,
-          row.year,
-          row.month,
-          row.week_1_start_water_level_ft,
-          row.week_1_reading_time,
-          row.week_2_start_water_level_ft,
-          row.week_2_reading_time,
-          row.week_3_start_water_level_ft,
-          row.week_3_reading_time,
-          row.week_4_start_water_level_ft,
-          row.week_4_reading_time,
-          row.week_5_start_water_level_ft,
-          row.week_5_reading_time
-        ]);
-        return csvResponse(headers, csvRows, "good_sensor_weekly_start_levels.csv");
+        return weeklyLevelsExcelResponse(rows, "good_sensor_weekly_start_levels.xls");
       }
 
       if (url.pathname === "/api/indicators/wards") {
