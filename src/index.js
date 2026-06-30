@@ -1062,6 +1062,144 @@ export default {
         return csvResponse(headers, csvRows, "groundwater_loss_ward_ranking.csv");
       }
 
+      if (url.pathname === "/api/good-sensor-weekly-start-levels.csv") {
+        const rows = await sql`
+          WITH good_sensors AS (
+            SELECT uid, ward_no, ward_name, qc_status
+            FROM sensor_qc_summary
+            WHERE qc_status = 'GOOD'
+              AND ward_no IS NOT NULL
+              AND ward_no <> ''
+          ),
+          uploaded_uids AS (
+            SELECT DISTINCT uid FROM uploaded_type_b_sessions
+          ),
+          type_b_points AS (
+            SELECT
+              q.ward_no,
+              q.ward_name,
+              q.uid,
+              q.qc_status,
+              b.start_time AS time,
+              b.water_level_start_ft AS water_level_ft
+            FROM uploaded_type_b_sessions b
+            JOIN good_sensors q ON q.uid = b.uid
+            WHERE b.water_level_start_ft IS NOT NULL
+            UNION ALL
+            SELECT
+              q.ward_no,
+              q.ward_name,
+              q.uid,
+              q.qc_status,
+              b.stop_time AS time,
+              b.water_level_stop_ft AS water_level_ft
+            FROM uploaded_type_b_sessions b
+            JOIN good_sensors q ON q.uid = b.uid
+            WHERE b.water_level_stop_ft IS NOT NULL
+          ),
+          kh_points AS (
+            SELECT
+              q.ward_no,
+              q.ward_name,
+              q.uid,
+              q.qc_status,
+              w.time,
+              COALESCE(w.water_level, w.on_level, w.off_level) AS water_level_ft
+            FROM water_levels w
+            JOIN good_sensors q ON q.uid = w.uid
+            WHERE q.uid NOT IN (SELECT uid FROM uploaded_uids)
+              AND COALESCE(w.water_level, w.on_level, w.off_level) IS NOT NULL
+          ),
+          points AS (
+            SELECT * FROM type_b_points
+            UNION ALL
+            SELECT * FROM kh_points
+          ),
+          keyed AS (
+            SELECT
+              ward_no,
+              ward_name,
+              uid,
+              qc_status,
+              EXTRACT(YEAR FROM time)::integer AS year,
+              EXTRACT(MONTH FROM time)::integer AS month_number,
+              TO_CHAR(DATE_TRUNC('month', time), 'YYYY-MM Mon') AS month,
+              LEAST((((EXTRACT(DAY FROM time)::integer - 1) / 7) + 1), 5)::integer AS week_number,
+              time AS reading_time,
+              water_level_ft
+            FROM points
+          ),
+          first_readings AS (
+            SELECT *,
+              ROW_NUMBER() OVER (
+                PARTITION BY uid, year, month_number, week_number
+                ORDER BY reading_time ASC
+              ) AS reading_rank
+            FROM keyed
+          )
+          SELECT
+            ward_no,
+            ward_name,
+            uid,
+            qc_status,
+            year,
+            month_number,
+            month,
+            MAX(water_level_ft) FILTER (WHERE week_number = 1) AS week_1_start_water_level_ft,
+            MAX(reading_time) FILTER (WHERE week_number = 1) AS week_1_reading_time,
+            MAX(water_level_ft) FILTER (WHERE week_number = 2) AS week_2_start_water_level_ft,
+            MAX(reading_time) FILTER (WHERE week_number = 2) AS week_2_reading_time,
+            MAX(water_level_ft) FILTER (WHERE week_number = 3) AS week_3_start_water_level_ft,
+            MAX(reading_time) FILTER (WHERE week_number = 3) AS week_3_reading_time,
+            MAX(water_level_ft) FILTER (WHERE week_number = 4) AS week_4_start_water_level_ft,
+            MAX(reading_time) FILTER (WHERE week_number = 4) AS week_4_reading_time,
+            MAX(water_level_ft) FILTER (WHERE week_number = 5) AS week_5_start_water_level_ft,
+            MAX(reading_time) FILTER (WHERE week_number = 5) AS week_5_reading_time
+          FROM first_readings
+          WHERE reading_rank = 1
+          GROUP BY ward_no, ward_name, uid, qc_status, year, month_number, month
+          ORDER BY year DESC, month_number DESC, ward_no, ward_name, uid
+        `;
+
+        const headers = [
+          "ward_no",
+          "ward_name",
+          "uid",
+          "qc_status",
+          "year",
+          "month",
+          "week_1_start_water_level_ft",
+          "week_1_reading_time",
+          "week_2_start_water_level_ft",
+          "week_2_reading_time",
+          "week_3_start_water_level_ft",
+          "week_3_reading_time",
+          "week_4_start_water_level_ft",
+          "week_4_reading_time",
+          "week_5_start_water_level_ft",
+          "week_5_reading_time"
+        ];
+        const csvRows = rows.map(row => [
+          row.ward_no,
+          row.ward_name,
+          row.uid,
+          row.qc_status,
+          row.year,
+          row.month,
+          row.week_1_start_water_level_ft,
+          row.week_1_reading_time,
+          row.week_2_start_water_level_ft,
+          row.week_2_reading_time,
+          row.week_3_start_water_level_ft,
+          row.week_3_reading_time,
+          row.week_4_start_water_level_ft,
+          row.week_4_reading_time,
+          row.week_5_start_water_level_ft,
+          row.week_5_reading_time
+        ]);
+        return csvResponse(headers, csvRows, "good_sensor_weekly_start_levels.csv");
+      }
+
       if (url.pathname === "/api/indicators/wards") {
         const rows = await sql`
           WITH recent_rainfall AS (
