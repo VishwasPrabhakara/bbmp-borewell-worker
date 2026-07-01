@@ -170,7 +170,7 @@ function cleanLevelPoints(points) {
     .filter(point => isValidWaterLevel(point.level) && point.time)
     .sort((a, b) => new Date(a.time) - new Date(b.time));
 
-  return sorted.filter((point, index) => {
+  const spikeCleaned = sorted.filter((point, index) => {
     if (index === 0 || index === sorted.length - 1) return true;
     const previous = sorted[index - 1];
     const next = sorted[index + 1];
@@ -179,6 +179,17 @@ function cleanLevelPoints(points) {
       && Math.abs(previous.level - next.level) < 50;
     return !isolatedSpike;
   });
+
+  const values = spikeCleaned.map(point => point.level);
+  const center = median(values);
+  const deviations = values.map(value => Math.abs(value - center));
+  const mad = median(deviations);
+  if (!Number.isFinite(center) || !Number.isFinite(mad) || mad === 0 || values.length < 5) {
+    return spikeCleaned;
+  }
+
+  const robustLimit = Math.max(100, mad * 6);
+  return spikeCleaned.filter(point => Math.abs(point.level - center) <= robustLimit);
 }
 
 function weekNumberForDate(date) {
@@ -273,6 +284,9 @@ function weeklyWardPayload(rows, qcRows, includeSensorDetails = false) {
         maxDropPerDay: null,
         dropAllPositive: false,
         dropSensorCount: 0,
+        plottedGoodSensorCount: 0,
+        goodSensorUids: [],
+        noWeeklyDataUids: [],
         uidCount: 0,
         weekly: [],
         sensors: []
@@ -313,6 +327,9 @@ function weeklyWardPayload(rows, qcRows, includeSensorDetails = false) {
         maxDropPerDay: null,
         dropAllPositive: false,
         dropSensorCount: 0,
+        plottedGoodSensorCount: 0,
+        goodSensorUids: [],
+        noWeeklyDataUids: [],
         uidCount: 0,
         weekly: [],
         sensors: []
@@ -320,7 +337,10 @@ function weeklyWardPayload(rows, qcRows, includeSensorDetails = false) {
     }
     const ward = wardMap.get(wardKey);
     ward.totalSensors += 1;
-    if (row.qc_status === "GOOD") ward.goodSensors += 1;
+    if (row.qc_status === "GOOD") {
+      ward.goodSensors += 1;
+      ward.goodSensorUids.push(String(row.uid));
+    }
   }
 
   const sensors = Array.from(sensorMap.values()).map(sensor => {
@@ -376,6 +396,11 @@ function weeklyWardPayload(rows, qcRows, includeSensorDetails = false) {
   for (const ward of wardMap.values()) {
     ward.notUsableSensors = Math.max(ward.totalSensors - ward.goodSensors, 0);
     ward.goodPercent = ward.totalSensors ? roundNumber((ward.goodSensors / ward.totalSensors) * 100, 1) : 0;
+    const plottableSensors = ward.sensors.filter(sensor => sensor.points.length > 0);
+    const plottableUidSet = new Set(plottableSensors.map(sensor => String(sensor.uid)));
+    ward.noWeeklyDataUids = ward.goodSensorUids.filter(uid => !plottableUidSet.has(String(uid)));
+    ward.sensors = plottableSensors;
+    ward.plottedGoodSensorCount = ward.sensors.length;
     ward.uidCount = ward.sensors.length;
     const wardDrops = ward.sensors.map(sensor => sensor.dropPerDay).filter(value => Number.isFinite(value));
     ward.dropSensorCount = wardDrops.length;
