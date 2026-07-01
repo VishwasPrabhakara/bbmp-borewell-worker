@@ -69,6 +69,65 @@ function waterLevelCell(value) {
   return Number.isFinite(numberValue) ? Math.round(numberValue * 100) / 100 : value;
 }
 
+function formatExcelDateTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).formatToParts(date).reduce((acc, part) => {
+    acc[part.type] = part.value;
+    return acc;
+  }, {});
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
+}
+
+function notUsableReason(row) {
+  const flags = (Array.isArray(row.flags) ? row.flags : []).filter(flag => flag !== "NO_DISCHARGE");
+  const rangeDetails = [];
+  if (Number(row.water_negative_count) > 0) {
+    rangeDetails.push(`${row.water_negative_count} water-level values are negative`);
+  }
+  if (Number(row.water_too_deep_count) > 0) {
+    rangeDetails.push(`${row.water_too_deep_count} water-level/on/off values exceed 1500 ft`);
+  }
+  if (Number(row.discharge_negative_count) > 0) {
+    rangeDetails.push(`${row.discharge_negative_count} discharge values are negative`);
+  }
+  if (Number(row.discharge_too_high_count) > 0) {
+    rangeDetails.push(`${row.discharge_too_high_count} discharge values exceed 20000 LPM`);
+  }
+  if (Number(row.on_off_logic_error_count) > 0) {
+    rangeDetails.push(`${row.on_off_logic_error_count} readings have ON level less than or equal to OFF level`);
+  }
+  const descriptions = {
+    NO_DATA: "No sensor readings are available.",
+    TOO_FEW_READINGS: `Only ${row.total_readings || 0} readings are available, so the sensor does not have enough observations for reliable trend analysis.`,
+    NO_WATER_LEVEL: "No water-level readings are available from this sensor.",
+    STALE_DATA: `Latest reading is old${row.stale_data_days != null ? ` (${Math.round(Number(row.stale_data_days))} days stale)` : ""}.`,
+    RANGE_ERRORS: rangeDetails.length
+      ? `Invalid value details: ${rangeDetails.join("; ")}.`
+      : `${row.range_error_count || 0} values failed range checks. Detailed subtype counts will appear after rerunning sensor QC.`,
+    LONG_GAPS: `${row.gap_count || 0} long gaps found in the time series${row.max_gap_hours ? `; maximum gap is ${roundNumber(row.max_gap_hours, 1)} hours` : ""}.`,
+    SPIKES: `${row.spike_count || 0} sudden spike/drop events detected between consecutive readings.`,
+    FLATLINES: `${row.flatline_count || 0} flatline stretches detected, suggesting the sensor may be stuck or not updating.`,
+    DUPLICATE_TIMESTAMPS: "Duplicate timestamps were found in the raw readings.",
+    OUTSIDE_BBMP_BOUNDARY: "Sensor location falls outside the BBMP ward boundary layer."
+  };
+
+  const reasons = flags.map(flag => descriptions[flag] || flag.replace(/_/g, " ").toLowerCase());
+  if (!reasons.length) {
+    return "Sensor has data but did not meet GOOD quality criteria. Review water-level continuity and recent data availability.";
+  }
+  return reasons.join(" ");
+}
+
 function median(values) {
   const sorted = values.filter(value => Number.isFinite(value)).sort((a, b) => a - b);
   if (!sorted.length) return null;
@@ -365,6 +424,81 @@ function inlineCell(row, column, value, style = 3) {
 function numberCell(row, column, value, style = 4) {
   if (value === null || value === undefined || value === "") return "";
   return `<c r="${cellAddress(row, column)}" s="${style}"><v>${xmlEscape(value)}</v></c>`;
+}
+
+function tableExcelResponse(headers, rows, filename, sheetName = "Sheet1") {
+  const sheetRows = [
+    `<row r="1">${headers.map((header, index) => inlineCell(1, index + 1, header, 2)).join("")}</row>`
+  ];
+
+  rows.forEach((row, rowIndex) => {
+    const excelRow = rowIndex + 2;
+    const cells = row.map((value, colIndex) => {
+      if (typeof value === "number" && Number.isFinite(value)) {
+        return numberCell(excelRow, colIndex + 1, value, 4);
+      }
+      return inlineCell(excelRow, colIndex + 1, value, 3);
+    });
+    sheetRows.push(`<row r="${excelRow}">${cells.join("")}</row>`);
+  });
+
+  const maxColumn = Math.max(headers.length, 1);
+  const maxRow = Math.max(rows.length + 1, 1);
+  const cols = `<col min="1" max="${maxColumn}" width="18" customWidth="1"/>`;
+  const worksheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <dimension ref="A1:${cellAddress(maxRow, maxColumn)}"/>
+  <sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
+  <cols>${cols}</cols>
+  <sheetData>${sheetRows.join("")}</sheetData>
+</worksheet>`;
+
+  const workbook = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets><sheet name="${xmlEscape(sheetName)}" sheetId="1" r:id="rId1"/></sheets>
+</workbook>`;
+
+  const styles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts>
+  <fills count="4"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE7E6E6"/><bgColor indexed="64"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFD9E2F3"/><bgColor indexed="64"/></patternFill></fill></fills>
+  <borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border><border><left style="thin"><color rgb="FF9CA3AF"/></left><right style="thin"><color rgb="FF9CA3AF"/></right><top style="thin"><color rgb="FF9CA3AF"/></top><bottom style="thin"><color rgb="FF9CA3AF"/></bottom><diagonal/></border></borders>
+  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="5">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>
+    <xf numFmtId="0" fontId="1" fillId="2" borderId="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+    <xf numFmtId="0" fontId="1" fillId="3" borderId="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="1" applyBorder="1"/>
+    <xf numFmtId="2" fontId="0" fillId="0" borderId="1" applyNumberFormat="1" applyBorder="1"/>
+  </cellXfs>
+  <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
+</styleSheet>`;
+
+  const zip = makeZip([
+    {
+      name: "[Content_Types].xml",
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`
+    },
+    {
+      name: "_rels/.rels",
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`
+    },
+    { name: "xl/workbook.xml", data: workbook },
+    {
+      name: "xl/_rels/workbook.xml.rels",
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`
+    },
+    { name: "xl/worksheets/sheet1.xml", data: worksheet },
+    { name: "xl/styles.xml", data: styles }
+  ]);
+
+  return new Response(zip, {
+    headers: {
+      "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "content-disposition": `attachment; filename="${filename}"`,
+      "access-control-allow-origin": "*"
+    }
+  });
 }
 
 function weeklyLevelsExcelResponse(rows, filename) {
@@ -1312,6 +1446,66 @@ export default {
         });
       }
 
+      if (
+        url.pathname === "/api/qc/not-usable-sensors.xlsx"
+        || url.pathname === "/api/qc/not-usable-sensors.csv"
+      ) {
+        const rows = await sql`
+          SELECT *
+          FROM sensor_qc_summary
+          WHERE qc_status <> 'GOOD'
+            AND COALESCE(total_readings, 0) > 0
+          ORDER BY
+            CASE qc_status
+              WHEN 'POOR' THEN 1
+              WHEN 'USABLE_WITH_CAUTION' THEN 2
+              WHEN 'INSUFFICIENT_DATA' THEN 3
+              ELSE 4
+            END,
+            ward_no,
+            uid
+        `;
+        const headers = [
+          "uid",
+          "ward_no",
+          "ward_name",
+          "first_data_at",
+          "last_data_at",
+          "reason",
+          "total_readings",
+          "valid_readings",
+          "water_readings",
+          "gap_count",
+          "max_gap_hours",
+          "range_error_count",
+          "spike_count",
+          "flatline_count",
+          "stale_data_days",
+          "lat",
+          "lng"
+        ];
+        const csvRows = rows.map(row => [
+          row.uid,
+          row.ward_no,
+          row.ward_name,
+          formatExcelDateTime(row.first_data_at),
+          formatExcelDateTime(row.last_data_at),
+          notUsableReason(row),
+          row.total_readings,
+          row.valid_readings,
+          row.water_readings,
+          row.gap_count,
+          row.max_gap_hours,
+          row.range_error_count,
+          row.spike_count,
+          row.flatline_count,
+          row.stale_data_days,
+          row.lat,
+          row.lng
+        ]);
+        return tableExcelResponse(headers, csvRows, "not_usable_sensor_qc_reasons.xlsx", "Not Usable Sensors");
+      }
+
       if (url.pathname === "/api/qc/wards") {
         const rows = await sql`
           SELECT *
@@ -1345,7 +1539,43 @@ export default {
         });
       }
 
-            if (url.pathname === "/api/consumption/wards") {
+      if (url.pathname === "/api/population/wards") {
+        const rows = await sql`
+          SELECT
+            ward_no,
+            ward_name,
+            area_km2,
+            population_2001,
+            population_2011,
+            cagr_2001_2011,
+            projected_population_2024,
+            projected_population_2026,
+            households_2011,
+            projected_households_2024,
+            imported_at
+          FROM ward_population_estimates
+          ORDER BY NULLIF(regexp_replace(ward_no, '[^0-9]', '', 'g'), '')::int NULLS LAST, ward_no
+        `;
+
+        return json({
+          wards: rows.map(row => ({
+            wardNo: row.ward_no,
+            wardName: row.ward_name,
+            areaKm2: row.area_km2,
+            population2001: row.population_2001,
+            population2011: row.population_2011,
+            cagr2001To2011: row.cagr_2001_2011,
+            projectedPopulation2024: row.projected_population_2024,
+            projectedPopulation2026: row.projected_population_2026,
+            households2011: row.households_2011,
+            projectedHouseholds2024: row.projected_households_2024,
+            importedAt: row.imported_at
+          })),
+          count: rows.length
+        });
+      }
+
+      if (url.pathname === "/api/consumption/wards") {
         const rows = await sql`
           WITH latest AS (
             SELECT DISTINCT ON (normalized_ward_name)
@@ -1974,6 +2204,10 @@ export default {
 
         if (url.pathname === "/api/ward-weekly-levels") {
           return json(url.searchParams.get("ward_no") ? { ward: null, weeks: [] } : { wards: [], weeks: [] });
+        }
+
+        if (url.pathname === "/api/population/wards") {
+          return json({ wards: [], count: 0 });
         }
 
         if (url.pathname === "/api/water-level") {
