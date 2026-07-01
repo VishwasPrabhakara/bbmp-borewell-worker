@@ -154,7 +154,7 @@ function normalizeWardNoValue(value) {
 
 function isValidWaterLevel(value) {
   const numberValue = Number(value);
-  return Number.isFinite(numberValue) && numberValue > 0 && numberValue <= 1500;
+  return Number.isFinite(numberValue) && numberValue > 0;
 }
 
 function primaryLevel(point) {
@@ -164,32 +164,69 @@ function primaryLevel(point) {
   return null;
 }
 
+function localMedian(points, index, radius, key) {
+  const start = Math.max(0, index - radius);
+  const end = Math.min(points.length, index + radius + 1);
+  return median(points.slice(start, end).map(point => Number(point[key])));
+}
+
+function localMad(points, index, radius, key, center) {
+  const start = Math.max(0, index - radius);
+  const end = Math.min(points.length, index + radius + 1);
+  return median(points.slice(start, end).map(point => Math.abs(Number(point[key]) - center)));
+}
+
+function smoothExpected(points, index, radius, key) {
+  const previous = [];
+  const next = [];
+  for (let cursor = index - 1; cursor >= 0 && previous.length < radius; cursor -= 1) previous.push(points[cursor]);
+  for (let cursor = index + 1; cursor < points.length && next.length < radius; cursor += 1) next.push(points[cursor]);
+  const neighbours = previous.concat(next).map(point => Number(point[key])).filter(Number.isFinite);
+  return median(neighbours);
+}
+
 function cleanLevelPoints(points) {
   const sorted = points
     .map(point => ({ ...point, level: primaryLevel(point) }))
     .filter(point => isValidWaterLevel(point.level) && point.time)
     .sort((a, b) => new Date(a.time) - new Date(b.time));
 
-  const spikeCleaned = sorted.filter((point, index) => {
-    if (index === 0 || index === sorted.length - 1) return true;
-    const previous = sorted[index - 1];
-    const next = sorted[index + 1];
-    const isolatedSpike = Math.abs(point.level - previous.level) > 100
-      && Math.abs(point.level - next.level) > 100
-      && Math.abs(previous.level - next.level) < 50;
-    return !isolatedSpike;
-  });
+  if (sorted.length < 5) return sorted;
 
-  const values = spikeCleaned.map(point => point.level);
+  const values = sorted.map(point => point.level);
   const center = median(values);
   const deviations = values.map(value => Math.abs(value - center));
   const mad = median(deviations);
-  if (!Number.isFinite(center) || !Number.isFinite(mad) || mad === 0 || values.length < 5) {
-    return spikeCleaned;
-  }
+  const globalMad = Number.isFinite(mad) && mad > 0 ? mad : median(values.slice(1).map((value, index) => Math.abs(value - values[index]))) || 10;
+  const localRadius = sorted.length >= 9 ? 3 : 2;
 
-  const robustLimit = Math.max(75, mad * 3);
-  return spikeCleaned.filter(point => Math.abs(point.level - center) <= robustLimit);
+  return sorted.filter((point, index) => {
+    const localCenter = localMedian(sorted, index, localRadius, "level");
+    const localDeviation = localMad(sorted, index, localRadius, "level", localCenter);
+    const localLimit = Math.max(25, (Number.isFinite(localDeviation) && localDeviation > 0 ? localDeviation : globalMad) * 4);
+    const failsRollingMedian = Number.isFinite(localCenter) && Math.abs(point.level - localCenter) > localLimit;
+
+    const smoothCenter = smoothExpected(sorted, index, localRadius, "level");
+    const smoothLimit = Math.max(35, globalMad * 5);
+    const failsSmoothTrend = Number.isFinite(smoothCenter) && Math.abs(point.level - smoothCenter) > smoothLimit;
+
+    let failsSlopeReversal = false;
+    if (index > 0 && index < sorted.length - 1) {
+      const previous = sorted[index - 1];
+      const next = sorted[index + 1];
+      const previousJump = Math.abs(point.level - previous.level);
+      const nextJump = Math.abs(point.level - next.level);
+      const neighbourJump = Math.abs(next.level - previous.level);
+      const jumpLimit = Math.max(40, globalMad * 5);
+      const neighbourLimit = Math.max(25, globalMad * 3);
+      failsSlopeReversal = previousJump > jumpLimit && nextJump > jumpLimit && neighbourJump <= neighbourLimit;
+    }
+
+    const residualLimit = Math.max(50, globalMad * 6);
+    const failsHampel = Number.isFinite(center) && Math.abs(point.level - center) > residualLimit;
+
+    return !(failsRollingMedian || failsSmoothTrend || failsSlopeReversal || failsHampel);
+  });
 }
 
 function weekNumberForDate(date) {
@@ -367,7 +404,7 @@ function weeklyWardPayload(rows, qcRows, includeSensorDetails = false) {
       level: point.level
     })));
     const weeklyDrops = consecutiveDrops(weeklyPoints);
-    const drawdowns = sessionDrawdowns(sensor.rawPoints);
+    const drawdowns = sessionDrawdowns(cleanedDaily);
     return {
       uid: sensor.uid,
       wardNo: sensor.wardNo,
