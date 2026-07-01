@@ -185,13 +185,57 @@ function smoothExpected(points, index, radius, key) {
   return median(neighbours);
 }
 
+function cleanShortLevelSeries(points, key) {
+  if (points.length < 2) return points;
+  const jumpLimit = 80;
+  if (points.length === 2) {
+    return Math.abs(Number(points[1][key]) - Number(points[0][key])) > jumpLimit ? [] : points;
+  }
+
+  let cleaned = points.slice();
+  let changed = true;
+  while (changed && cleaned.length >= 3) {
+    changed = false;
+    const firstJump = Math.abs(Number(cleaned[1][key]) - Number(cleaned[0][key]));
+    const secondJump = Math.abs(Number(cleaned[2][key]) - Number(cleaned[1][key]));
+    const firstToThird = Math.abs(Number(cleaned[2][key]) - Number(cleaned[0][key]));
+    if (firstJump > jumpLimit && secondJump <= jumpLimit) {
+      cleaned = cleaned.slice(1);
+      changed = true;
+      continue;
+    }
+    if (firstJump > jumpLimit && firstToThird <= jumpLimit) {
+      cleaned.splice(1, 1);
+      changed = true;
+      continue;
+    }
+
+    const last = cleaned.length - 1;
+    const lastJump = Math.abs(Number(cleaned[last][key]) - Number(cleaned[last - 1][key]));
+    const previousJump = Math.abs(Number(cleaned[last - 1][key]) - Number(cleaned[last - 2][key]));
+    const lastToPreviousPrevious = Math.abs(Number(cleaned[last][key]) - Number(cleaned[last - 2][key]));
+    if (lastJump > jumpLimit && previousJump <= jumpLimit) {
+      cleaned = cleaned.slice(0, last);
+      changed = true;
+      continue;
+    }
+    if (lastJump > jumpLimit && lastToPreviousPrevious <= jumpLimit) {
+      cleaned.splice(last - 1, 1);
+      changed = true;
+    }
+  }
+
+  if (cleaned.length === 2 && Math.abs(Number(cleaned[1][key]) - Number(cleaned[0][key])) > jumpLimit) return [];
+  return cleaned;
+}
+
 function cleanLevelPoints(points) {
   const sorted = points
     .map(point => ({ ...point, level: primaryLevel(point) }))
     .filter(point => isValidWaterLevel(point.level) && point.time)
     .sort((a, b) => new Date(a.time) - new Date(b.time));
 
-  if (sorted.length < 5) return sorted;
+  if (sorted.length < 5) return cleanShortLevelSeries(sorted, "level");
 
   const values = sorted.map(point => point.level);
   const center = median(values);
