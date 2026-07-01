@@ -146,6 +146,12 @@ function weeklyLabel(year, monthNumber, weekNumber) {
   return `${monthLabel(year, monthNumber)} W${weekNumber}`;
 }
 
+function normalizeWardNoValue(value) {
+  const numberValue = Number(value);
+  if (Number.isFinite(numberValue)) return String(Math.trunc(numberValue));
+  return String(value ?? "").trim().replace(/\.0+$/, "");
+}
+
 function isValidWaterLevel(value) {
   const numberValue = Number(value);
   return Number.isFinite(numberValue) && numberValue >= 0 && numberValue <= 1500;
@@ -2115,10 +2121,11 @@ export default {
 
       if (url.pathname === "/api/ward-weekly-levels") {
         const wardNo = url.searchParams.get("ward_no");
+        const normalizedWardNo = normalizeWardNoValue(wardNo);
         const qcRows = wardNo ? await sql`
           SELECT uid, ward_no, ward_name, qc_status
           FROM sensor_qc_summary
-          WHERE ward_no = ${wardNo}
+          WHERE regexp_replace(ward_no, '\.0+$', '') = ${normalizedWardNo}
         ` : await sql`
           SELECT uid, ward_no, ward_name, qc_status
           FROM sensor_qc_summary
@@ -2130,7 +2137,7 @@ export default {
             SELECT uid, ward_no, ward_name
             FROM sensor_qc_summary
             WHERE qc_status = 'GOOD'
-              AND ward_no = ${wardNo}
+              AND regexp_replace(ward_no, '\.0+$', '') = ${normalizedWardNo}
           ),
           uploaded_uids AS (
             SELECT DISTINCT uid FROM uploaded_type_b_sessions
@@ -2224,7 +2231,7 @@ export default {
 
         const payload = weeklyWardPayload(rows, qcRows, Boolean(wardNo));
         return json(wardNo ? {
-          ward: payload.wards.find(ward => String(ward.wardNo) === String(wardNo)) || null,
+          ward: payload.wards.find(ward => normalizeWardNoValue(ward.wardNo) === normalizedWardNo) || null,
           weeks: payload.weeks
         } : payload);
       }
