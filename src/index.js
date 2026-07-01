@@ -146,41 +146,113 @@ function weeklyLabel(year, monthNumber, weekNumber) {
   return `${monthLabel(year, monthNumber)} W${weekNumber}`;
 }
 
+function isValidWaterLevel(value) {
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) && numberValue >= 0 && numberValue <= 1500;
+}
+
+function primaryLevel(point) {
+  if (isValidWaterLevel(point.onLevel)) return Number(point.onLevel);
+  if (isValidWaterLevel(point.waterLevel)) return Number(point.waterLevel);
+  if (isValidWaterLevel(point.offLevel)) return Number(point.offLevel);
+  return null;
+}
+
+function cleanLevelPoints(points) {
+  const sorted = points
+    .map(point => ({ ...point, level: primaryLevel(point) }))
+    .filter(point => isValidWaterLevel(point.level) && point.time)
+    .sort((a, b) => new Date(a.time) - new Date(b.time));
+
+  return sorted.filter((point, index) => {
+    if (index === 0 || index === sorted.length - 1) return true;
+    const previous = sorted[index - 1];
+    const next = sorted[index + 1];
+    const isolatedSpike = Math.abs(point.level - previous.level) > 100
+      && Math.abs(point.level - next.level) > 100
+      && Math.abs(previous.level - next.level) < 50;
+    return !isolatedSpike;
+  });
+}
+
+function weekNumberForDate(date) {
+  return Math.min(Math.floor((date.getUTCDate() - 1) / 7) + 1, 4);
+}
+
+function rollingWeeklyPoints(points) {
+  const cleaned = cleanLevelPoints(points);
+  const selected = [];
+  let previousTime = null;
+  for (const point of cleaned) {
+    const time = new Date(point.time);
+    if (!previousTime || (time - previousTime) / 86400000 >= 7) {
+      previousTime = time;
+      selected.push({
+        label: weeklyLabel(time.getUTCFullYear(), time.getUTCMonth() + 1, weekNumberForDate(time)),
+        time: point.time,
+        level: roundNumber(point.level, 2)
+      });
+    }
+  }
+  return selected;
+}
+
 function dropPerDay(points) {
   const available = points
-    .filter(point => Number.isFinite(point.level))
-    .sort((a, b) => a.position - b.position);
+    .filter(point => Number.isFinite(point.level) && point.time)
+    .sort((a, b) => new Date(a.time) - new Date(b.time));
   const drops = [];
   for (let index = 0; index < available.length - 1; index += 1) {
     const current = available[index];
     const next = available[index + 1];
-    const days = (next.position - current.position) * 7;
+    const days = (new Date(next.time) - new Date(current.time)) / 86400000;
     if (days > 0) drops.push((next.level - current.level) / days);
   }
   return drops.length ? roundNumber(drops.reduce((sum, value) => sum + value, 0) / drops.length, 4) : null;
 }
 
-function weeklyWardPayload(rows, qcRows) {
+function consecutiveDrops(points) {
+  const drops = [];
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const current = points[index];
+    const next = points[index + 1];
+    const days = (new Date(next.time) - new Date(current.time)) / 86400000;
+    if (days <= 0) continue;
+    const drop = next.level - current.level;
+    drops.push({
+      label: next.label || new Date(next.time).toISOString().slice(0, 10),
+      time: next.time,
+      dropFt: roundNumber(drop, 3),
+      dropFtPerDay: roundNumber(drop / days, 4),
+      dropFtPerHour: roundNumber(drop / (days * 24), 5)
+    });
+  }
+  return drops;
+}
+
+function sessionDrawdowns(points) {
+  return points
+    .filter(point => isValidWaterLevel(point.onLevel)
+      && isValidWaterLevel(point.offLevel)
+      && Number(point.onLevel) > Number(point.offLevel)
+      && Number(point.runtimeHours) > 0)
+    .map(point => {
+      const drop = Number(point.onLevel) - Number(point.offLevel);
+      return {
+        label: new Date(point.time).toISOString().slice(0, 10),
+        time: point.time,
+        dropFt: roundNumber(drop, 3),
+        dropFtPerHour: roundNumber(drop / Number(point.runtimeHours), 5)
+      };
+    });
+}
+
+function weeklyWardPayload(rows, qcRows, includeSensorDetails = false) {
   const weekMap = new Map();
   const sensorMap = new Map();
   const wardMap = new Map();
 
   for (const row of rows) {
-    const year = Number(row.year);
-    const monthNumber = Number(row.month_number);
-    const weekNumber = Number(row.week_number);
-    const weekKey = `${year}-${String(monthNumber).padStart(2, "0")}-${weekNumber}`;
-    if (!weekMap.has(weekKey)) {
-      weekMap.set(weekKey, {
-        key: weekKey,
-        year,
-        monthNumber,
-        weekNumber,
-        label: weeklyLabel(year, monthNumber, weekNumber),
-        position: weekMap.size
-      });
-    }
-
     const wardKey = String(row.ward_no);
     if (!wardMap.has(wardKey)) {
       wardMap.set(wardKey, {
@@ -208,10 +280,16 @@ function weeklyWardPayload(rows, qcRows) {
         wardNo: row.ward_no,
         wardName: row.ward_name,
         dropPerDay: null,
-        pointsByWeek: new Map()
+        rawPoints: []
       });
     }
-    sensorMap.get(sensorKey).pointsByWeek.set(weekKey, roundNumber(row.water_level_ft, 2));
+    sensorMap.get(sensorKey).rawPoints.push({
+      time: row.reading_time,
+      waterLevel: row.water_level_ft,
+      onLevel: row.on_level,
+      offLevel: row.off_level,
+      runtimeHours: row.runtime_hours
+    });
   }
 
   for (const row of qcRows) {
@@ -239,28 +317,50 @@ function weeklyWardPayload(rows, qcRows) {
     if (row.qc_status === "GOOD") ward.goodSensors += 1;
   }
 
-  const weeks = Array.from(weekMap.values()).sort((a, b) => {
-    if (a.year !== b.year) return a.year - b.year;
-    if (a.monthNumber !== b.monthNumber) return a.monthNumber - b.monthNumber;
-    return a.weekNumber - b.weekNumber;
-  });
-  weeks.forEach((week, index) => { week.position = index; });
-
   const sensors = Array.from(sensorMap.values()).map(sensor => {
-    const points = weeks.map(week => ({
-      key: week.key,
-      label: week.label,
-      position: week.position,
-      level: sensor.pointsByWeek.get(week.key) ?? null
-    }));
+    const cleanedDaily = cleanLevelPoints(sensor.rawPoints);
+    const weeklyPoints = rollingWeeklyPoints(sensor.rawPoints);
+    const dailyDrops = consecutiveDrops(cleanedDaily.map(point => ({
+      label: new Date(point.time).toISOString().slice(0, 10),
+      time: point.time,
+      level: point.level
+    })));
+    const weeklyDrops = consecutiveDrops(weeklyPoints);
+    const drawdowns = sessionDrawdowns(sensor.rawPoints);
     return {
       uid: sensor.uid,
       wardNo: sensor.wardNo,
       wardName: sensor.wardName,
-      dropPerDay: dropPerDay(points),
-      points: points.map(({ label, level }) => ({ label, level }))
+      dropPerDay: dropPerDay(weeklyPoints),
+      points: weeklyPoints.map(({ label, time, level }) => ({ label, time, level })),
+      ...(includeSensorDetails ? {
+        dailyLevels: cleanedDaily.map(point => ({
+          label: new Date(point.time).toISOString().slice(0, 10),
+          time: point.time,
+          waterLevel: roundNumber(point.waterLevel, 2),
+          onLevel: isValidWaterLevel(point.onLevel) ? roundNumber(point.onLevel, 2) : null,
+          offLevel: isValidWaterLevel(point.offLevel) ? roundNumber(point.offLevel, 2) : null,
+          primaryLevel: roundNumber(point.level, 2)
+        })),
+        dailyDrops,
+        sessionDrawdowns: drawdowns,
+        weeklyDrops
+      } : {})
     };
   });
+
+  const allWeekLabels = [];
+  const weekTimes = new Map();
+  for (const sensor of sensors) {
+    for (const point of sensor.points) {
+      if (!allWeekLabels.includes(point.label)) allWeekLabels.push(point.label);
+      const timeValue = new Date(point.time).getTime();
+      if (!weekTimes.has(point.label) || timeValue < weekTimes.get(point.label)) {
+        weekTimes.set(point.label, timeValue);
+      }
+    }
+  }
+  allWeekLabels.sort((a, b) => (weekTimes.get(a) || 0) - (weekTimes.get(b) || 0));
 
   for (const sensor of sensors) {
     const ward = wardMap.get(String(sensor.wardNo));
@@ -277,12 +377,12 @@ function weeklyWardPayload(rows, qcRows) {
     ward.medianDropPerDay = wardDrops.length ? roundNumber(median(wardDrops), 4) : null;
     ward.maxDropPerDay = wardDrops.length ? roundNumber(Math.max(...wardDrops), 4) : null;
     ward.dropAllPositive = wardDrops.length ? wardDrops.every(value => value > 0) : false;
-    ward.weekly = weeks.map(week => {
+    ward.weekly = allWeekLabels.map(label => {
       const values = ward.sensors
-        .map(sensor => sensor.points.find(point => point.label === week.label)?.level)
+        .map(sensor => sensor.points.find(point => point.label === label)?.level)
         .filter(value => Number.isFinite(value));
       return {
-        label: week.label,
+        label,
         averageLevel: values.length ? roundNumber(values.reduce((sum, value) => sum + value, 0) / values.length, 2) : null,
         medianLevel: median(values),
         sensorCount: values.length
@@ -292,7 +392,7 @@ function weeklyWardPayload(rows, qcRows) {
   }
 
   return {
-    weeks: weeks.map(({ label }) => label),
+    weeks: allWeekLabels,
     wards: Array.from(wardMap.values()).sort((a, b) => Number(a.wardNo) - Number(b.wardNo))
   };
 }
@@ -2036,52 +2136,42 @@ export default {
             SELECT DISTINCT uid FROM uploaded_type_b_sessions
           ),
           type_b_points AS (
-            SELECT q.ward_no, q.ward_name, q.uid, b.start_time AS time, b.water_level_start_ft AS water_level_ft
-            FROM uploaded_type_b_sessions b
-            JOIN good_sensors q ON q.uid = b.uid
-            WHERE b.water_level_start_ft IS NOT NULL
-            UNION ALL
-            SELECT q.ward_no, q.ward_name, q.uid, b.stop_time AS time, b.water_level_stop_ft AS water_level_ft
+            SELECT
+              q.ward_no,
+              q.ward_name,
+              q.uid,
+              b.stop_time AS reading_time,
+              b.water_level_stop_ft AS water_level_ft,
+              b.water_level_stop_ft AS on_level,
+              b.water_level_start_ft AS off_level,
+              COALESCE(b.session_duration_min, EXTRACT(EPOCH FROM (b.stop_time - b.start_time)) / 60) / 60 AS runtime_hours
             FROM uploaded_type_b_sessions b
             JOIN good_sensors q ON q.uid = b.uid
             WHERE b.water_level_stop_ft IS NOT NULL
           ),
           kh_points AS (
-            SELECT q.ward_no, q.ward_name, q.uid, w.time, COALESCE(w.water_level, w.on_level, w.off_level) AS water_level_ft
+            SELECT
+              q.ward_no,
+              q.ward_name,
+              q.uid,
+              w.time AS reading_time,
+              COALESCE(w.water_level, w.on_level, w.off_level) AS water_level_ft,
+              w.on_level,
+              w.off_level,
+              NULL::double precision AS runtime_hours
             FROM water_levels w
             JOIN good_sensors q ON q.uid = w.uid
             WHERE q.uid NOT IN (SELECT uid FROM uploaded_uids)
               AND COALESCE(w.water_level, w.on_level, w.off_level) IS NOT NULL
-          ),
-          keyed AS (
-            SELECT
-              ward_no,
-              ward_name,
-              uid,
-              EXTRACT(YEAR FROM time)::integer AS year,
-              EXTRACT(MONTH FROM time)::integer AS month_number,
-              LEAST((((EXTRACT(DAY FROM time)::integer - 1) / 7) + 1), 4)::integer AS week_number,
-              time AS reading_time,
-              water_level_ft
-            FROM (
-              SELECT * FROM type_b_points
-              UNION ALL
-              SELECT * FROM kh_points
-            ) points
-            WHERE time >= DATE '2026-01-01'
-          ),
-          first_readings AS (
-            SELECT *,
-              ROW_NUMBER() OVER (
-                PARTITION BY uid, year, month_number, week_number
-                ORDER BY reading_time ASC
-              ) AS reading_rank
-            FROM keyed
           )
-          SELECT ward_no, ward_name, uid, year, month_number, week_number, reading_time, water_level_ft
-          FROM first_readings
-          WHERE reading_rank = 1
-          ORDER BY year, month_number, week_number, ward_no, uid
+          SELECT ward_no, ward_name, uid, reading_time, water_level_ft, on_level, off_level, runtime_hours
+          FROM (
+            SELECT * FROM type_b_points
+            UNION ALL
+            SELECT * FROM kh_points
+          ) points
+          WHERE reading_time >= DATE '2026-01-01'
+          ORDER BY ward_no, uid, reading_time
         ` : await sql`
           WITH good_sensors AS (
             SELECT uid, ward_no, ward_name
@@ -2094,55 +2184,45 @@ export default {
             SELECT DISTINCT uid FROM uploaded_type_b_sessions
           ),
           type_b_points AS (
-            SELECT q.ward_no, q.ward_name, q.uid, b.start_time AS time, b.water_level_start_ft AS water_level_ft
-            FROM uploaded_type_b_sessions b
-            JOIN good_sensors q ON q.uid = b.uid
-            WHERE b.water_level_start_ft IS NOT NULL
-            UNION ALL
-            SELECT q.ward_no, q.ward_name, q.uid, b.stop_time AS time, b.water_level_stop_ft AS water_level_ft
+            SELECT
+              q.ward_no,
+              q.ward_name,
+              q.uid,
+              b.stop_time AS reading_time,
+              b.water_level_stop_ft AS water_level_ft,
+              b.water_level_stop_ft AS on_level,
+              b.water_level_start_ft AS off_level,
+              COALESCE(b.session_duration_min, EXTRACT(EPOCH FROM (b.stop_time - b.start_time)) / 60) / 60 AS runtime_hours
             FROM uploaded_type_b_sessions b
             JOIN good_sensors q ON q.uid = b.uid
             WHERE b.water_level_stop_ft IS NOT NULL
           ),
           kh_points AS (
-            SELECT q.ward_no, q.ward_name, q.uid, w.time, COALESCE(w.water_level, w.on_level, w.off_level) AS water_level_ft
+            SELECT
+              q.ward_no,
+              q.ward_name,
+              q.uid,
+              w.time AS reading_time,
+              COALESCE(w.water_level, w.on_level, w.off_level) AS water_level_ft,
+              w.on_level,
+              w.off_level,
+              NULL::double precision AS runtime_hours
             FROM water_levels w
             JOIN good_sensors q ON q.uid = w.uid
             WHERE q.uid NOT IN (SELECT uid FROM uploaded_uids)
               AND COALESCE(w.water_level, w.on_level, w.off_level) IS NOT NULL
-          ),
-          keyed AS (
-            SELECT
-              ward_no,
-              ward_name,
-              uid,
-              EXTRACT(YEAR FROM time)::integer AS year,
-              EXTRACT(MONTH FROM time)::integer AS month_number,
-              LEAST((((EXTRACT(DAY FROM time)::integer - 1) / 7) + 1), 4)::integer AS week_number,
-              time AS reading_time,
-              water_level_ft
-            FROM (
-              SELECT * FROM type_b_points
-              UNION ALL
-              SELECT * FROM kh_points
-            ) points
-            WHERE time >= DATE '2026-01-01'
-          ),
-          first_readings AS (
-            SELECT *,
-              ROW_NUMBER() OVER (
-                PARTITION BY uid, year, month_number, week_number
-                ORDER BY reading_time ASC
-              ) AS reading_rank
-            FROM keyed
           )
-          SELECT ward_no, ward_name, uid, year, month_number, week_number, reading_time, water_level_ft
-          FROM first_readings
-          WHERE reading_rank = 1
-          ORDER BY year, month_number, week_number, ward_no, uid
+          SELECT ward_no, ward_name, uid, reading_time, water_level_ft, on_level, off_level, runtime_hours
+          FROM (
+            SELECT * FROM type_b_points
+            UNION ALL
+            SELECT * FROM kh_points
+          ) points
+          WHERE reading_time >= DATE '2026-01-01'
+          ORDER BY ward_no, uid, reading_time
         `;
 
-        const payload = weeklyWardPayload(rows, qcRows);
+        const payload = weeklyWardPayload(rows, qcRows, Boolean(wardNo));
         return json(wardNo ? {
           ward: payload.wards.find(ward => String(ward.wardNo) === String(wardNo)) || null,
           weeks: payload.weeks
