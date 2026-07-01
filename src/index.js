@@ -154,7 +154,7 @@ function normalizeWardNoValue(value) {
 
 function isValidWaterLevel(value) {
   const numberValue = Number(value);
-  return Number.isFinite(numberValue) && numberValue >= 0 && numberValue <= 1500;
+  return Number.isFinite(numberValue) && numberValue > 0 && numberValue <= 1500;
 }
 
 function primaryLevel(point) {
