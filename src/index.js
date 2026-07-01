@@ -277,6 +277,7 @@ function weeklyWardPayload(rows, qcRows, includeSensorDetails = false) {
         wardName: row.ward_name,
         totalSensors: 0,
         goodSensors: 0,
+        qcGoodSensorCount: 0,
         notUsableSensors: 0,
         goodPercent: 0,
         avgDropPerDay: null,
@@ -300,6 +301,7 @@ function weeklyWardPayload(rows, qcRows, includeSensorDetails = false) {
         wardNo: row.ward_no,
         wardName: row.ward_name,
         dropPerDay: null,
+        isQcGood: false,
         rawPoints: []
       });
     }
@@ -320,6 +322,7 @@ function weeklyWardPayload(rows, qcRows, includeSensorDetails = false) {
         wardName: row.ward_name,
         totalSensors: 0,
         goodSensors: 0,
+        qcGoodSensorCount: 0,
         notUsableSensors: 0,
         goodPercent: 0,
         avgDropPerDay: null,
@@ -338,7 +341,7 @@ function weeklyWardPayload(rows, qcRows, includeSensorDetails = false) {
     const ward = wardMap.get(wardKey);
     ward.totalSensors += 1;
     if (row.qc_status === "GOOD") {
-      ward.goodSensors += 1;
+      ward.qcGoodSensorCount += 1;
       ward.goodSensorUids.push(String(row.uid));
       if (!sensorMap.has(String(row.uid))) {
         sensorMap.set(String(row.uid), {
@@ -346,8 +349,11 @@ function weeklyWardPayload(rows, qcRows, includeSensorDetails = false) {
           wardNo: row.ward_no,
           wardName: row.ward_name,
           dropPerDay: null,
+          isQcGood: true,
           rawPoints: []
         });
+      } else {
+        sensorMap.get(String(row.uid)).isQcGood = true;
       }
     }
   }
@@ -366,6 +372,7 @@ function weeklyWardPayload(rows, qcRows, includeSensorDetails = false) {
       uid: sensor.uid,
       wardNo: sensor.wardNo,
       wardName: sensor.wardName,
+      isQcGood: Boolean(sensor.isQcGood),
       dropPerDay: dropPerDay(weeklyPoints),
       points: weeklyPoints.map(({ label, time, level }) => ({ label, time, level })),
       ...(includeSensorDetails ? {
@@ -386,7 +393,7 @@ function weeklyWardPayload(rows, qcRows, includeSensorDetails = false) {
 
   const allWeekLabels = [];
   const weekTimes = new Map();
-  for (const sensor of sensors) {
+  for (const sensor of sensors.filter(sensor => sensor.isQcGood && sensor.points.length > 0)) {
     for (const point of sensor.points) {
       if (!allWeekLabels.includes(point.label)) allWeekLabels.push(point.label);
       const timeValue = new Date(point.time).getTime();
@@ -399,17 +406,19 @@ function weeklyWardPayload(rows, qcRows, includeSensorDetails = false) {
 
   for (const sensor of sensors) {
     const ward = wardMap.get(String(sensor.wardNo));
-    if (ward) ward.sensors.push(sensor);
+    if (ward && sensor.isQcGood) ward.sensors.push(sensor);
   }
 
   for (const ward of wardMap.values()) {
-    ward.notUsableSensors = Math.max(ward.totalSensors - ward.goodSensors, 0);
-    ward.goodPercent = ward.totalSensors ? roundNumber((ward.goodSensors / ward.totalSensors) * 100, 1) : 0;
     const plottableSensors = ward.sensors.filter(sensor => sensor.points.length > 0);
     const plottableUidSet = new Set(plottableSensors.map(sensor => String(sensor.uid)));
     ward.noWeeklyDataUids = ward.goodSensorUids.filter(uid => !plottableUidSet.has(String(uid)));
     ward.plottedGoodSensorCount = plottableSensors.length;
-    ward.uidCount = ward.sensors.length;
+    ward.goodSensors = plottableSensors.length;
+    ward.notUsableSensors = Math.max(ward.totalSensors - ward.goodSensors, 0);
+    ward.goodPercent = ward.totalSensors ? roundNumber((ward.goodSensors / ward.totalSensors) * 100, 1) : 0;
+    ward.uidCount = plottableSensors.length;
+    ward.sensors = plottableSensors;
     const wardDrops = ward.sensors.map(sensor => sensor.dropPerDay).filter(value => Number.isFinite(value));
     ward.dropSensorCount = wardDrops.length;
     ward.avgDropPerDay = wardDrops.length ? roundNumber(wardDrops.reduce((sum, value) => sum + value, 0) / wardDrops.length, 4) : null;
