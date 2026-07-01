@@ -188,7 +188,7 @@ function cleanLevelPoints(points) {
     return spikeCleaned;
   }
 
-  const robustLimit = Math.max(100, mad * 6);
+  const robustLimit = Math.max(75, mad * 3);
   return spikeCleaned.filter(point => Math.abs(point.level - center) <= robustLimit);
 }
 
@@ -340,6 +340,15 @@ function weeklyWardPayload(rows, qcRows, includeSensorDetails = false) {
     if (row.qc_status === "GOOD") {
       ward.goodSensors += 1;
       ward.goodSensorUids.push(String(row.uid));
+      if (!sensorMap.has(String(row.uid))) {
+        sensorMap.set(String(row.uid), {
+          uid: String(row.uid),
+          wardNo: row.ward_no,
+          wardName: row.ward_name,
+          dropPerDay: null,
+          rawPoints: []
+        });
+      }
     }
   }
 
@@ -399,8 +408,7 @@ function weeklyWardPayload(rows, qcRows, includeSensorDetails = false) {
     const plottableSensors = ward.sensors.filter(sensor => sensor.points.length > 0);
     const plottableUidSet = new Set(plottableSensors.map(sensor => String(sensor.uid)));
     ward.noWeeklyDataUids = ward.goodSensorUids.filter(uid => !plottableUidSet.has(String(uid)));
-    ward.sensors = plottableSensors;
-    ward.plottedGoodSensorCount = ward.sensors.length;
+    ward.plottedGoodSensorCount = plottableSensors.length;
     ward.uidCount = ward.sensors.length;
     const wardDrops = ward.sensors.map(sensor => sensor.dropPerDay).filter(value => Number.isFinite(value));
     ward.dropSensorCount = wardDrops.length;
@@ -2202,7 +2210,6 @@ export default {
             UNION ALL
             SELECT * FROM kh_points
           ) points
-          WHERE reading_time >= DATE '2026-01-01'
           ORDER BY ward_no, uid, reading_time
         ` : await sql`
           WITH good_sensors AS (
@@ -2250,7 +2257,6 @@ export default {
             UNION ALL
             SELECT * FROM kh_points
           ) points
-          WHERE reading_time >= DATE '2026-01-01'
           ORDER BY ward_no, uid, reading_time
         `;
 
