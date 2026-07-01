@@ -191,6 +191,9 @@ function weeklyWardPayload(rows, qcRows) {
         notUsableSensors: 0,
         goodPercent: 0,
         avgDropPerDay: null,
+        medianDropPerDay: null,
+        maxDropPerDay: null,
+        dropAllPositive: false,
         uidCount: 0,
         weekly: [],
         sensors: []
@@ -221,6 +224,9 @@ function weeklyWardPayload(rows, qcRows) {
         notUsableSensors: 0,
         goodPercent: 0,
         avgDropPerDay: null,
+        medianDropPerDay: null,
+        maxDropPerDay: null,
+        dropAllPositive: false,
         uidCount: 0,
         weekly: [],
         sensors: []
@@ -265,6 +271,9 @@ function weeklyWardPayload(rows, qcRows) {
     ward.uidCount = ward.sensors.length;
     const wardDrops = ward.sensors.map(sensor => sensor.dropPerDay).filter(value => Number.isFinite(value));
     ward.avgDropPerDay = wardDrops.length ? roundNumber(wardDrops.reduce((sum, value) => sum + value, 0) / wardDrops.length, 4) : null;
+    ward.medianDropPerDay = wardDrops.length ? roundNumber(median(wardDrops), 4) : null;
+    ward.maxDropPerDay = wardDrops.length ? roundNumber(Math.max(...wardDrops), 4) : null;
+    ward.dropAllPositive = wardDrops.length ? wardDrops.every(value => value > 0) : false;
     ward.weekly = weeks.map(week => {
       const values = ward.sensors
         .map(sensor => sensor.points.find(point => point.label === week.label)?.level)
