@@ -1026,6 +1026,73 @@ async function ensureUploadedTables(sql) {
   `;
 }
 
+async function ensureVendorTables(sql) {
+  await sql`
+    CREATE TABLE IF NOT EXISTS vendor_sensors (
+      device_name TEXT PRIMARY KEY,
+      constituency TEXT NULL,
+      ward_no TEXT NULL,
+      ward_name TEXT NULL,
+      lat DOUBLE PRECISION NULL,
+      lng DOUBLE PRECISION NULL,
+      first_data_at TIMESTAMP NULL,
+      last_data_at TIMESTAMP NULL,
+      water_readings INTEGER DEFAULT 0,
+      total_readings INTEGER DEFAULT 0,
+      updated_at TIMESTAMP DEFAULT NOW()
+    )
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS vendor_water_levels (
+      id SERIAL PRIMARY KEY,
+      device_name TEXT NOT NULL,
+      constituency TEXT NULL,
+      ward_no TEXT NULL,
+      lat DOUBLE PRECISION NULL,
+      lng DOUBLE PRECISION NULL,
+      water_level_ft DOUBLE PRECISION NULL,
+      updated_at TIMESTAMP NOT NULL,
+      source_file TEXT NULL
+    )
+  `;
+  await sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS vendor_water_levels_device_time_key
+    ON vendor_water_levels (device_name, updated_at)
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS vendor_sensor_qc (
+      uid TEXT PRIMARY KEY,
+      ward_no TEXT NULL,
+      ward_name TEXT NULL,
+      lat DOUBLE PRECISION NULL,
+      lng DOUBLE PRECISION NULL,
+      data_source TEXT DEFAULT 'vendor',
+      first_data_at TIMESTAMP NULL,
+      last_data_at TIMESTAMP NULL,
+      total_readings INTEGER DEFAULT 0,
+      valid_readings INTEGER DEFAULT 0,
+      invalid_readings INTEGER DEFAULT 0,
+      water_readings INTEGER DEFAULT 0,
+      discharge_readings INTEGER DEFAULT 0,
+      duplicate_timestamp_count INTEGER DEFAULT 0,
+      gap_count INTEGER DEFAULT 0,
+      max_gap_hours DOUBLE PRECISION DEFAULT 0,
+      range_error_count INTEGER DEFAULT 0,
+      spike_count INTEGER DEFAULT 0,
+      flatline_count INTEGER DEFAULT 0,
+      stale_data_days DOUBLE PRECISION NULL,
+      coverage_score DOUBLE PRECISION DEFAULT 0,
+      range_score DOUBLE PRECISION DEFAULT 0,
+      stability_score DOUBLE PRECISION DEFAULT 0,
+      recent_data_score DOUBLE PRECISION DEFAULT 0,
+      overall_qc_score DOUBLE PRECISION DEFAULT 0,
+      qc_status TEXT DEFAULT 'NO_DATA',
+      flags JSONB DEFAULT '[]'::jsonb,
+      updated_at TIMESTAMP DEFAULT NOW()
+    )
+  `;
+}
+
 async function ensureCompactUploadTable(sql) {
   await sql`
     CREATE TABLE IF NOT EXISTS uploaded_sensor_series (
@@ -1580,6 +1647,46 @@ export default {
       }
 
       if (url.pathname === "/api/sensors") {
+        const source = url.searchParams.get("source") || "kh";
+        if (source === "vendor") {
+          await ensureVendorTables(sql);
+          const rows = await sql`
+            SELECT
+              device_name AS uid,
+              lat,
+              lng,
+              ward_no,
+              ward_name,
+              'water' AS data_category,
+              COALESCE(water_readings, 0) > 0 AS has_data,
+              first_data_at,
+              last_data_at,
+              COALESCE(water_readings, 0) AS water_readings,
+              0 AS discharge_readings,
+              COALESCE(total_readings, 0) AS total_readings
+            FROM vendor_sensors
+            ORDER BY device_name
+          `;
+          return json({
+            source: "vendor",
+            sensors: rows.map(row => ({
+              uid: row.uid,
+              lat: row.lat,
+              lng: row.lng,
+              wardNo: row.ward_no,
+              wardName: row.ward_name,
+              dataCategory: row.data_category || "water",
+              hasData: !!row.has_data,
+              firstDataAt: row.first_data_at,
+              lastDataAt: row.last_data_at,
+              waterReadings: row.water_readings || 0,
+              dischargeReadings: 0,
+              totalReadings: row.total_readings || 0
+            })),
+            sensorsWithWaterData: rows.filter(row => row.has_data).length
+          });
+        }
+
         await ensureCompactUploadTable(sql);
         const rows = await sql`
           SELECT
@@ -1628,8 +1735,68 @@ export default {
       }
 
       if (url.pathname === "/api/qc/sensors") {
+        const source = url.searchParams.get("source") || "kh";
         const wardNo = url.searchParams.get("ward_no");
         const status = url.searchParams.get("status");
+        if (source === "vendor") {
+          await ensureVendorTables(sql);
+          const rows = wardNo && status ? await sql`
+            SELECT *
+            FROM vendor_sensor_qc
+            WHERE ward_no = ${wardNo}
+              AND qc_status = ${status}
+            ORDER BY ward_no, overall_qc_score DESC, uid
+          ` : wardNo ? await sql`
+            SELECT *
+            FROM vendor_sensor_qc
+            WHERE ward_no = ${wardNo}
+            ORDER BY overall_qc_score DESC, uid
+          ` : status ? await sql`
+            SELECT *
+            FROM vendor_sensor_qc
+            WHERE qc_status = ${status}
+            ORDER BY ward_no, overall_qc_score DESC, uid
+          ` : await sql`
+            SELECT *
+            FROM vendor_sensor_qc
+            ORDER BY ward_no, overall_qc_score DESC, uid
+          `;
+          return json({
+            source: "vendor",
+            sensors: rows.map(row => ({
+              uid: row.uid,
+              wardNo: row.ward_no,
+              wardName: row.ward_name,
+              lat: row.lat,
+              lng: row.lng,
+              dataSource: row.data_source || "vendor",
+              firstDataAt: row.first_data_at,
+              lastDataAt: row.last_data_at,
+              totalReadings: row.total_readings || 0,
+              validReadings: row.valid_readings || 0,
+              invalidReadings: row.invalid_readings || 0,
+              waterReadings: row.water_readings || 0,
+              dischargeReadings: 0,
+              duplicateTimestampCount: row.duplicate_timestamp_count || 0,
+              gapCount: row.gap_count || 0,
+              maxGapHours: row.max_gap_hours || 0,
+              rangeErrorCount: row.range_error_count || 0,
+              spikeCount: row.spike_count || 0,
+              flatlineCount: row.flatline_count || 0,
+              staleDataDays: row.stale_data_days,
+              coverageScore: row.coverage_score || 0,
+              rangeScore: row.range_score || 0,
+              stabilityScore: row.stability_score || 0,
+              recentDataScore: row.recent_data_score || 0,
+              overallQcScore: row.overall_qc_score || 0,
+              qcStatus: row.qc_status || "NO_DATA",
+              flags: Array.isArray(row.flags) ? row.flags : [],
+              updatedAt: row.updated_at
+            })),
+            count: rows.length
+          });
+        }
+
         const rows = wardNo && status ? await sql`
           SELECT *
           FROM sensor_qc_summary
@@ -2243,8 +2410,71 @@ export default {
       }
 
       if (url.pathname === "/api/ward-weekly-levels") {
+        const source = url.searchParams.get("source") || "kh";
         const wardNo = url.searchParams.get("ward_no");
         const normalizedWardNo = normalizeWardNoValue(wardNo);
+        if (source === "vendor") {
+          await ensureVendorTables(sql);
+          const qcRows = wardNo ? await sql`
+            SELECT uid, ward_no, ward_name, qc_status
+            FROM vendor_sensor_qc
+            WHERE regexp_replace(ward_no, '\.0+$', '') = ${normalizedWardNo}
+          ` : await sql`
+            SELECT uid, ward_no, ward_name, qc_status
+            FROM vendor_sensor_qc
+            WHERE ward_no IS NOT NULL
+              AND ward_no <> ''
+          `;
+          const rows = wardNo ? await sql`
+            WITH good_sensors AS (
+              SELECT uid, ward_no, ward_name
+              FROM vendor_sensor_qc
+              WHERE qc_status = 'GOOD'
+                AND regexp_replace(ward_no, '\.0+$', '') = ${normalizedWardNo}
+            )
+            SELECT
+              q.ward_no,
+              q.ward_name,
+              q.uid,
+              v.updated_at AS reading_time,
+              v.water_level_ft,
+              NULL::double precision AS on_level,
+              NULL::double precision AS off_level,
+              NULL::double precision AS runtime_hours
+            FROM vendor_water_levels v
+            JOIN good_sensors q ON q.uid = v.device_name
+            WHERE v.water_level_ft IS NOT NULL
+            ORDER BY q.ward_no, q.uid, v.updated_at
+          ` : await sql`
+            WITH good_sensors AS (
+              SELECT uid, ward_no, ward_name
+              FROM vendor_sensor_qc
+              WHERE qc_status = 'GOOD'
+                AND ward_no IS NOT NULL
+                AND ward_no <> ''
+            )
+            SELECT
+              q.ward_no,
+              q.ward_name,
+              q.uid,
+              v.updated_at AS reading_time,
+              v.water_level_ft,
+              NULL::double precision AS on_level,
+              NULL::double precision AS off_level,
+              NULL::double precision AS runtime_hours
+            FROM vendor_water_levels v
+            JOIN good_sensors q ON q.uid = v.device_name
+            WHERE v.water_level_ft IS NOT NULL
+            ORDER BY q.ward_no, q.uid, v.updated_at
+          `;
+          const payload = weeklyWardPayload(rows, qcRows, Boolean(wardNo));
+          return json(wardNo ? {
+            source: "vendor",
+            ward: payload.wards.find(ward => normalizeWardNoValue(ward.wardNo) === normalizedWardNo) || null,
+            weeks: payload.weeks
+          } : { source: "vendor", ...payload });
+        }
+
         const qcRows = wardNo ? await sql`
           SELECT uid, ward_no, ward_name, qc_status
           FROM sensor_qc_summary
@@ -2403,6 +2633,28 @@ export default {
       if (url.pathname === "/api/water-level") {
         const uid = url.searchParams.get("uid");
         if (!uid) return json({ error: "uid is required" }, 400);
+        const source = url.searchParams.get("source") || "kh";
+
+        if (source === "vendor") {
+          await ensureVendorTables(sql);
+          const rows = await sql`
+            SELECT updated_at AS time, water_level_ft AS water_level
+            FROM vendor_water_levels
+            WHERE device_name = ${uid}
+            ORDER BY updated_at
+          `;
+          return json({
+            uid,
+            source: "vendor",
+            points: rows.map(row => ({
+              time: row.time,
+              waterLevel: row.water_level,
+              onLevel: null,
+              offLevel: null,
+              discharge: null
+            }))
+          });
+        }
 
         await ensureCompactUploadTable(sql);
         const compactRows = await sql`
