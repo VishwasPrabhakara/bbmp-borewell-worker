@@ -229,13 +229,41 @@ function cleanShortLevelSeries(points, key) {
   return cleaned;
 }
 
+function dominantContinuousSegment(points, key) {
+  if (points.length < 2) return points;
+  const jumpLimit = 80;
+  const segments = [];
+  let current = [points[0]];
+  for (let index = 1; index < points.length; index += 1) {
+    const previous = points[index - 1];
+    const point = points[index];
+    if (Math.abs(Number(point[key]) - Number(previous[key])) > jumpLimit) {
+      segments.push(current);
+      current = [point];
+    } else {
+      current.push(point);
+    }
+  }
+  segments.push(current);
+  if (segments.length === 1) return points;
+
+  segments.sort((a, b) => {
+    if (b.length !== a.length) return b.length - a.length;
+    return new Date(b[b.length - 1].time) - new Date(a[a.length - 1].time);
+  });
+  return segments[0].length >= 2 ? segments[0] : [];
+}
+
 function cleanLevelPoints(points) {
   const sorted = points
     .map(point => ({ ...point, level: primaryLevel(point) }))
     .filter(point => isValidWaterLevel(point.level) && point.time)
     .sort((a, b) => new Date(a.time) - new Date(b.time));
 
-  if (sorted.length < 5) return cleanShortLevelSeries(sorted, "level");
+  const uniqueLevels = new Set(sorted.map(point => roundNumber(point.level, 2)));
+  if (sorted.length >= 2 && uniqueLevels.size <= 1) return [];
+
+  if (sorted.length < 5) return dominantContinuousSegment(cleanShortLevelSeries(sorted, "level"), "level");
 
   const values = sorted.map(point => point.level);
   const center = median(values);
@@ -244,7 +272,7 @@ function cleanLevelPoints(points) {
   const globalMad = Number.isFinite(mad) && mad > 0 ? mad : median(values.slice(1).map((value, index) => Math.abs(value - values[index]))) || 10;
   const localRadius = sorted.length >= 9 ? 3 : 2;
 
-  return sorted.filter((point, index) => {
+  const cleaned = sorted.filter((point, index) => {
     const localCenter = localMedian(sorted, index, localRadius, "level");
     const localDeviation = localMad(sorted, index, localRadius, "level", localCenter);
     const localLimit = Math.max(25, (Number.isFinite(localDeviation) && localDeviation > 0 ? localDeviation : globalMad) * 4);
@@ -271,6 +299,7 @@ function cleanLevelPoints(points) {
 
     return !(failsRollingMedian || failsSmoothTrend || failsSlopeReversal || failsHampel);
   });
+  return dominantContinuousSegment(cleaned, "level");
 }
 
 function weekNumberForDate(date) {
