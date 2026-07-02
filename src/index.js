@@ -230,7 +230,7 @@ function cleanShortLevelSeries(points, key) {
 }
 
 function dominantContinuousSegment(points, key) {
-  if (points.length < 2) return points;
+  if (points.length < 3) return [];
   const jumpLimit = 80;
   const segments = [];
   let current = [points[0]];
@@ -251,7 +251,7 @@ function dominantContinuousSegment(points, key) {
     if (b.length !== a.length) return b.length - a.length;
     return new Date(b[b.length - 1].time) - new Date(a[a.length - 1].time);
   });
-  return segments[0].length >= 2 ? segments[0] : [];
+  return segments[0].length >= 3 ? segments[0] : [];
 }
 
 function cleanLevelPoints(points) {
