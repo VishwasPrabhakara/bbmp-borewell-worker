@@ -832,6 +832,20 @@ function minutesBetween(start, stop) {
   return (stopDate.getTime() - startDate.getTime()) / 60000;
 }
 
+function compactPointDurationMinutes(point) {
+  const directMinutes = Number(
+    point.session_duration_min
+      ?? point.sessionDurationMin
+      ?? point.durationMin
+      ?? point.duration_minutes
+      ?? point.durationMinutes
+  );
+  if (Number.isFinite(directMinutes) && directMinutes > 0) return directMinutes;
+  const runtimeHours = Number(point.runtime_hours ?? point.runtimeHours);
+  if (Number.isFinite(runtimeHours) && runtimeHours > 0) return runtimeHours * 60;
+  return null;
+}
+
 function datePart(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return String(value || "").slice(0, 10);
@@ -2360,13 +2374,40 @@ export default {
               .sort((a, b) => String(a.time).localeCompare(String(b.time)));
             let openSession = null;
             for (const point of points) {
-              const offLevel = compactPointLevel(point, "off_level");
-              const onLevel = compactPointLevel(point, "on_level");
-              const discharge = compactPointDischarge(point);
+            const offLevel = compactPointLevel(point, "off_level");
+            const onLevel = compactPointLevel(point, "on_level");
+            const discharge = compactPointDischarge(point);
+            const sameRecordDurationMin = compactPointDurationMinutes(point);
 
-              if (offLevel !== null) {
-                openSession = {
+            if (offLevel !== null && onLevel !== null && discharge !== null && discharge > 0) {
+              const drawdown = onLevel - offLevel;
+              if (drawdown > 0 && sameRecordDurationMin !== null && Math.round(sameRecordDurationMin) > 0) {
+                payloadRows.push({
+                  ward_no: sensor.ward_no,
+                  ward_name: sensor.ward_name,
+                  uid: sensor.uid,
+                  lat: sensor.lat,
+                  lng: sensor.lng,
                   start_time: point.time,
+                  stop_time: point.stop_time || point.time,
+                  duration_min: sameRecordDurationMin,
+                  water_level_start_ft: offLevel,
+                  water_level_stop_ft: onLevel,
+                  drawdown_ft: drawdown,
+                  min_discharge_lpm: discharge,
+                  avg_discharge_lpm: discharge,
+                  max_discharge_lpm: discharge,
+                  discharge_readings_in_session: 1,
+                  specific_capacity_lpm_per_ft: discharge / drawdown
+                });
+                openSession = null;
+                continue;
+              }
+            }
+
+            if (offLevel !== null) {
+              openSession = {
+                start_time: point.time,
                   water_level_start_ft: offLevel,
                   discharges: []
                 };
@@ -2553,17 +2594,44 @@ export default {
         `;
 
         const sensorRows = [];
+        const skippedSensors = [];
         for (const sensor of compactRows) {
           const payload = await gunzipJsonPayload(sensor.payload_gzip);
           const points = payload
             .filter(point => point.time)
             .sort((a, b) => String(a.time).localeCompare(String(b.time)));
           const sessions = [];
+          let sameRecordCandidateCount = 0;
+          let bridgedSessionCandidateCount = 0;
           let openSession = null;
           for (const point of points) {
             const offLevel = compactPointLevel(point, "off_level");
             const onLevel = compactPointLevel(point, "on_level");
             const discharge = compactPointDischarge(point);
+            const sameRecordDurationMin = compactPointDurationMinutes(point);
+            if (offLevel !== null && onLevel !== null && discharge !== null && discharge > 0) {
+              sameRecordCandidateCount += 1;
+              const drawdownFt = onLevel - offLevel;
+              if (sameRecordDurationMin !== null && Math.round(sameRecordDurationMin) > 0 && drawdownFt > 0) {
+                const drawdownM = drawdownFt * FT_TO_M;
+                const lowestDischargeM3s = discharge * LPM_TO_M3_PER_SEC;
+                const specificCapacityM2s = lowestDischargeM3s / drawdownM;
+                const inverseCapacitySPerM2 = inverseSpecificCapacity(specificCapacityM2s, drawdownM, lowestDischargeM3s);
+                sessions.push({
+                  date: datePart(point.time),
+                  label: formatExcelDateTime(point.time),
+                  time: point.time,
+                  stopTime: point.stop_time || point.time,
+                  durationMin: Math.round(sameRecordDurationMin),
+                  drawdownM: roundNumber(drawdownM, 3),
+                  lowestDischargeM3s: roundNumber(lowestDischargeM3s, 8),
+                  specificCapacityM2s: roundNumber(specificCapacityM2s, 8),
+                  inverseSpecificCapacitySPerM2: roundNumber(inverseCapacitySPerM2, 2)
+                });
+                openSession = null;
+                continue;
+              }
+            }
             if (offLevel !== null) {
               openSession = { startTime: point.time, startLevelFt: offLevel, discharges: [] };
             }
@@ -2573,6 +2641,7 @@ export default {
             if (openSession && onLevel !== null) {
               const durationMin = minutesBetween(openSession.startTime, point.time);
               const drawdownFt = onLevel - openSession.startLevelFt;
+              bridgedSessionCandidateCount += 1;
               if (durationMin !== null && Math.round(durationMin) > 0 && drawdownFt > 0 && openSession.discharges.length) {
                 const drawdownM = drawdownFt * FT_TO_M;
                 const lowestDischargeM3s = Math.min(...openSession.discharges) * LPM_TO_M3_PER_SEC;
@@ -2595,7 +2664,17 @@ export default {
           }
           const values = sessions.map(item => Number(item.specificCapacityM2s)).filter(Number.isFinite);
           const inverseValues = sessions.map(item => Number(item.inverseSpecificCapacitySPerM2)).filter(Number.isFinite);
-          if (!values.length) continue;
+          if (!values.length) {
+            skippedSensors.push({
+              uid: String(sensor.uid),
+              wardNo: sensor.ward_no,
+              wardName: sensor.ward_name,
+              reason: sameRecordCandidateCount || bridgedSessionCandidateCount
+                ? "Water level and discharge exist, but no session had positive drawdown, positive duration, and discharge inside the pumping period."
+                : "Water level and discharge exist for this UID, but OFF/ON pumping-session pairs could not be identified."
+            });
+            continue;
+          }
           sensorRows.push({
             uid: String(sensor.uid),
             wardNo: sensor.ward_no,
@@ -2627,7 +2706,13 @@ export default {
             averageInverseSpecificCapacitySPerM2: allInverseValues.length ? roundNumber(allInverseValues.reduce((sum, value) => sum + value, 0) / allInverseValues.length, 2) : null,
             maxInverseSpecificCapacitySPerM2: allInverseValues.length ? roundNumber(Math.max(...allInverseValues), 2) : null
           } : null,
-          sensors: sensorRows
+          sensors: sensorRows,
+          diagnostics: {
+            candidateSensorsWithWaterAndDischarge: compactRows.length,
+            sensorsWithValidSpecificCapacity: sensorRows.length,
+            sensorsWithoutValidSpecificCapacity: skippedSensors.length,
+            skippedSensors
+          }
         });
       }
 
