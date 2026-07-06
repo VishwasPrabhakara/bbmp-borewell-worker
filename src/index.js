@@ -2,6 +2,8 @@ import { neon } from "@neondatabase/serverless";
 
 const FRESHNESS_HOURS = 6;
 const RUNNING_TIMEOUT_MINUTES = 30;
+const FT_TO_M = 0.3048;
+const LPM_TO_M3_PER_SEC = 1 / 60000;
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -696,6 +698,10 @@ function numberCell(row, column, value, style = 4) {
   return `<c r="${cellAddress(row, column)}" s="${style}"><v>${xmlEscape(value)}</v></c>`;
 }
 
+function formulaCell(row, column, formula, value, style = 3) {
+  return `<c r="${cellAddress(row, column)}" s="${style}"><f>${xmlEscape(formula)}</f><v>${xmlEscape(value ?? "")}</v></c>`;
+}
+
 function tableExcelResponse(headers, rows, filename, sheetName = "Sheet1") {
   const sheetRows = [
     `<row r="1">${headers.map((header, index) => inlineCell(1, index + 1, header, 2)).join("")}</row>`
@@ -826,6 +832,65 @@ function minutesBetween(start, stop) {
   return (stopDate.getTime() - startDate.getTime()) / 60000;
 }
 
+function datePart(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value || "").slice(0, 10);
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(date);
+}
+
+function convertedSpecificCapacity(row) {
+  const drawdownM = Number(row.drawdown_ft) * FT_TO_M;
+  const lowestDischargeM3s = Number(row.min_discharge_lpm) * LPM_TO_M3_PER_SEC;
+  return {
+    startWaterLevelM: Number(row.water_level_start_ft) * FT_TO_M,
+    stopWaterLevelM: Number(row.water_level_stop_ft) * FT_TO_M,
+    drawdownM,
+    lowestDischargeM3s,
+    specificCapacityM3sPerM: drawdownM > 0 ? lowestDischargeM3s / drawdownM : null
+  };
+}
+
+function averageSpecificCapacity(rows) {
+  const values = rows
+    .map(row => convertedSpecificCapacity(row).specificCapacityM3sPerM)
+    .filter(value => Number.isFinite(value));
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+}
+
+function maxSpecificCapacity(rows) {
+  const values = rows
+    .map(row => convertedSpecificCapacity(row).specificCapacityM3sPerM)
+    .filter(value => Number.isFinite(value));
+  return values.length ? Math.max(...values) : null;
+}
+
+function specificCapacityPreamble(uid, rows) {
+  const first = rows[0] || {};
+  return [
+    ["Ward No", first.ward_no || ""],
+    ["Ward Name", first.ward_name || ""],
+    ["UID", uid],
+    ["Latitude", first.lat || ""],
+    ["Longitude", first.lng || ""],
+    ["Valid pumping sessions", rows.length],
+    ["Average Specific Capacity (m2/s)", roundNumber(averageSpecificCapacity(rows), 8)],
+    ["Maximum Specific Capacity (m2/s)", roundNumber(maxSpecificCapacity(rows), 8)],
+    [],
+    ["Calculation steps and units"],
+    ["1 ft = 0.3048 m"],
+    ["1 L/min = 1/60000 m3/s"],
+    ["Drawdown / Drop (m) = (Stop water level below ground - Start water level below ground) x 0.3048"],
+    ["Lowest discharge (m3/s) = lowest discharge during that pumping session x 1/60000"],
+    ["Specific Capacity (m2/s) = Lowest discharge (m3/s) / Drawdown (m)"],
+    []
+  ];
+}
+
 function multiSheetExcelResponse(sheets, filename) {
   const usedNames = new Set();
   const normalizedSheets = sheets.map((sheet, index) => {
@@ -843,13 +908,29 @@ function multiSheetExcelResponse(sheets, filename) {
   const worksheetXml = (sheet) => {
     const headers = sheet.headers || [];
     const rows = sheet.rows || [];
-    const sheetRows = [
-      `<row r="1">${headers.map((header, index) => inlineCell(1, index + 1, header, 2)).join("")}</row>`
-    ];
+    const preambleRows = sheet.preambleRows || [];
+    const sheetRows = [];
+
+    preambleRows.forEach((row, rowIndex) => {
+      const excelRow = rowIndex + 1;
+      const cells = row.map((value, colIndex) => {
+        if (value && typeof value === "object" && value.formula) {
+          return formulaCell(excelRow, colIndex + 1, value.formula, value.value, 3);
+        }
+        return inlineCell(excelRow, colIndex + 1, value, 3);
+      });
+      sheetRows.push(`<row r="${excelRow}">${cells.join("")}</row>`);
+    });
+
+    const headerRow = preambleRows.length + 1;
+    sheetRows.push(`<row r="${headerRow}">${headers.map((header, index) => inlineCell(headerRow, index + 1, header, 2)).join("")}</row>`);
 
     rows.forEach((row, rowIndex) => {
-      const excelRow = rowIndex + 2;
+      const excelRow = headerRow + rowIndex + 1;
       const cells = row.map((value, colIndex) => {
+        if (value && typeof value === "object" && value.formula) {
+          return formulaCell(excelRow, colIndex + 1, value.formula, value.value, 3);
+        }
         if (typeof value === "number" && Number.isFinite(value)) {
           return numberCell(excelRow, colIndex + 1, value, 4);
         }
@@ -859,12 +940,12 @@ function multiSheetExcelResponse(sheets, filename) {
     });
 
     const maxColumn = Math.max(headers.length, 1);
-    const maxRow = Math.max(rows.length + 1, 1);
+    const maxRow = Math.max(preambleRows.length + rows.length + 1, 1);
     const cols = `<col min="1" max="${maxColumn}" width="20" customWidth="1"/>`;
     return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
   <dimension ref="A1:${cellAddress(maxRow, maxColumn)}"/>
-  <sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
+  <sheetViews><sheetView workbookViewId="0"><pane ySplit="${headerRow}" topLeftCell="A${headerRow + 1}" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
   <cols>${cols}</cols>
   <sheetData>${sheetRows.join("")}</sheetData>
 </worksheet>`;
@@ -2105,6 +2186,8 @@ export default {
       }
 
       if (url.pathname === "/api/specific-capacity/wards.xlsx") {
+        const requestedWardNo = url.searchParams.get("ward_no");
+        const normalizedRequestedWardNo = normalizeWardNoValue(requestedWardNo);
         let rows = await sql`
           WITH both_sensors AS (
             SELECT
@@ -2181,6 +2264,10 @@ export default {
             min_discharge_lpm / drawdown_ft AS specific_capacity_lpm_per_ft
           FROM session_discharge
           WHERE drawdown_ft > 0
+            AND COALESCE(
+              duration_min,
+              EXTRACT(EPOCH FROM (stop_time - start_time)) / 60.0
+            ) >= 0.5
           ORDER BY
             NULLIF(regexp_replace(ward_no, '[^0-9]', '', 'g'), '')::int NULLS LAST,
             ward_no,
@@ -2189,8 +2276,29 @@ export default {
             start_time
         `;
 
+        if (requestedWardNo) {
+          rows = rows.filter(row => normalizeWardNoValue(row.ward_no) === normalizedRequestedWardNo);
+        }
+
         if (!rows.length) {
-          const compactRows = await sql`
+          const compactRows = requestedWardNo ? await sql`
+            SELECT
+              u.uid,
+              COALESCE(NULLIF(s.ward_no, ''), NULLIF(q.ward_no, ''), NULLIF(a.ward_no, '')) AS ward_no,
+              COALESCE(NULLIF(s.ward_name, ''), NULLIF(q.ward_name, ''), NULLIF(a.ward_name, '')) AS ward_name,
+              COALESCE(u.lat, s.lat, q.lat, a.lat) AS lat,
+              COALESCE(u.lng, s.lng, q.lng, a.lng) AS lng,
+              u.payload_gzip
+            FROM uploaded_sensor_series u
+            LEFT JOIN sensors s ON s.uid = u.uid
+            LEFT JOIN sensor_qc_summary q ON q.uid = u.uid
+            LEFT JOIN sensor_ward_assignments a ON a.uid = u.uid
+            WHERE COALESCE(u.water_readings, 0) > 0
+              AND COALESCE(u.discharge_readings, 0) > 0
+              AND COALESCE(NULLIF(s.ward_no, ''), NULLIF(q.ward_no, ''), NULLIF(a.ward_no, '')) IS NOT NULL
+              AND regexp_replace(COALESCE(NULLIF(s.ward_no, ''), NULLIF(q.ward_no, ''), NULLIF(a.ward_no, '')), '\\.0+$', '') = ${normalizedRequestedWardNo}
+            ORDER BY COALESCE(NULLIF(s.ward_no, ''), NULLIF(q.ward_no, ''), NULLIF(a.ward_no, '')), u.uid
+          ` : await sql`
             SELECT
               u.uid,
               COALESCE(NULLIF(s.ward_no, ''), NULLIF(q.ward_no, ''), NULLIF(a.ward_no, '')) AS ward_no,
@@ -2235,7 +2343,8 @@ export default {
               if (openSession && onLevel !== null) {
                 const drawdown = onLevel - openSession.water_level_start_ft;
                 const discharges = openSession.discharges;
-                if (drawdown > 0 && discharges.length) {
+                const durationMin = minutesBetween(openSession.start_time, point.time);
+                if (drawdown > 0 && discharges.length && durationMin !== null && Math.round(durationMin) > 0) {
                   payloadRows.push({
                     ward_no: sensor.ward_no,
                     ward_name: sensor.ward_name,
@@ -2244,7 +2353,7 @@ export default {
                     lng: sensor.lng,
                     start_time: openSession.start_time,
                     stop_time: point.time,
-                    duration_min: minutesBetween(openSession.start_time, point.time),
+                    duration_min: durationMin,
                     water_level_start_ft: openSession.water_level_start_ft,
                     water_level_stop_ft: onLevel,
                     drawdown_ft: drawdown,
@@ -2270,22 +2379,16 @@ export default {
         }
 
         const sessionHeaders = [
-          "Ward No",
-          "Ward Name",
-          "UID",
-          "Latitude",
-          "Longitude",
+          "Date",
           "Pump Start",
           "Pump Stop",
           "Duration (min)",
-          "Start Water Level (ft)",
-          "Stop Water Level (ft)",
-          "Drawdown / Drop (ft)",
-          "Minimum Discharge (LPM)",
-          "Average Discharge (LPM)",
-          "Maximum Discharge (LPM)",
+          "Start Water Level (m)",
+          "Stop Water Level (m)",
+          "Drawdown / Drop (m)",
+          "Lowest Discharge (m3/s)",
           "Discharge Readings in Session",
-          "Specific Capacity (LPM/ft)"
+          "Specific Capacity (m2/s)"
         ];
 
         const wardGroups = new Map();
@@ -2302,21 +2405,22 @@ export default {
         const wardSummaryRows = Array.from(wardGroups.entries()).map(([wardKey, wardRows]) => {
           const [wardNo, wardName] = wardKey.split("|");
           const capacities = wardRows
-            .map(row => Number(row.specific_capacity_lpm_per_ft))
+            .map(row => convertedSpecificCapacity(row).specificCapacityM3sPerM)
             .filter(value => Number.isFinite(value));
           const drawdowns = wardRows
-            .map(row => Number(row.drawdown_ft))
+            .map(row => convertedSpecificCapacity(row).drawdownM)
             .filter(value => Number.isFinite(value));
           return [
             wardNo,
             wardName,
             new Set(wardRows.map(row => row.uid)).size,
+            Array.from(new Set(wardRows.map(row => String(row.uid)))).sort().join(", "),
             wardRows.length,
-            roundNumber(median(capacities), 2),
-            roundNumber(capacities.reduce((sum, value) => sum + value, 0) / capacities.length, 2),
-            roundNumber(Math.min(...capacities), 2),
-            roundNumber(Math.max(...capacities), 2),
-            roundNumber(median(drawdowns), 2)
+            roundNumber(median(capacities), 8),
+            roundNumber(capacities.reduce((sum, value) => sum + value, 0) / capacities.length, 8),
+            roundNumber(Math.min(...capacities), 8),
+            roundNumber(Math.max(...capacities), 8),
+            roundNumber(median(drawdowns), 3)
           ];
         }).sort((a, b) => {
           const wardA = Number(a[0]);
@@ -2325,24 +2429,21 @@ export default {
           return String(a[0]).localeCompare(String(b[0]));
         });
 
-        const sessionRow = row => [
-          row.ward_no,
-          row.ward_name,
-          row.uid,
-          roundNumber(row.lat, 6),
-          roundNumber(row.lng, 6),
-          formatExcelDateTime(row.start_time),
-          formatExcelDateTime(row.stop_time),
-          roundNumber(row.duration_min, 2),
-          roundNumber(row.water_level_start_ft, 2),
-          roundNumber(row.water_level_stop_ft, 2),
-          roundNumber(row.drawdown_ft, 2),
-          roundNumber(row.min_discharge_lpm, 2),
-          roundNumber(row.avg_discharge_lpm, 2),
-          roundNumber(row.max_discharge_lpm, 2),
-          Number(row.discharge_readings_in_session || 0),
-          roundNumber(row.specific_capacity_lpm_per_ft, 2)
-        ];
+        const sessionRow = row => {
+          const converted = convertedSpecificCapacity(row);
+          return [
+            datePart(row.start_time),
+            formatExcelDateTime(row.start_time),
+            formatExcelDateTime(row.stop_time),
+            row.duration_min == null ? "" : Math.round(Number(row.duration_min)),
+            roundNumber(converted.startWaterLevelM, 3),
+            roundNumber(converted.stopWaterLevelM, 3),
+            roundNumber(converted.drawdownM, 3),
+            roundNumber(converted.lowestDischargeM3s, 8),
+            Number(row.discharge_readings_in_session || 0),
+            roundNumber(converted.specificCapacityM3sPerM, 8)
+          ];
+        };
 
         const sheets = [
           {
@@ -2351,23 +2452,146 @@ export default {
               "Ward No",
               "Ward Name",
               "UID Count",
+              "UID List",
               "Valid Pumping Sessions",
-              "Median Specific Capacity (LPM/ft)",
-              "Average Specific Capacity (LPM/ft)",
-              "Minimum Specific Capacity (LPM/ft)",
-              "Maximum Specific Capacity (LPM/ft)",
-              "Median Drawdown / Drop (ft)"
+              "Median Specific Capacity (m2/s)",
+              "Average Specific Capacity (m2/s)",
+              "Minimum Specific Capacity (m2/s)",
+              "Maximum Specific Capacity (m2/s)",
+              "Median Drawdown / Drop (m)"
             ],
-            rows: wardSummaryRows
+            rows: [
+              ...wardSummaryRows,
+              [],
+              ["UID Links"],
+              ["Ward No", "Ward Name", "UID", "Average Specific Capacity (m2/s)"],
+              ...Array.from(uidGroups.entries())
+                .sort((a, b) => {
+                  const avgA = averageSpecificCapacity(a[1]);
+                  const avgB = averageSpecificCapacity(b[1]);
+                  return (avgB || 0) - (avgA || 0) || String(a[0]).localeCompare(String(b[0]));
+                })
+                .map(([uid, uidRows]) => {
+                  const first = uidRows[0] || {};
+                  const sheetName = safeExcelSheetName(uid);
+                  return [
+                    first.ward_no,
+                    first.ward_name,
+                    { formula: `HYPERLINK("#'${sheetName}'!A1","${uid}")`, value: uid },
+                    roundNumber(averageSpecificCapacity(uidRows), 8)
+                  ];
+                })
+            ]
           },
-          ...Array.from(uidGroups.entries()).sort((a, b) => String(a[0]).localeCompare(String(b[0]))).map(([uid, uidRows]) => ({
+          ...Array.from(uidGroups.entries()).sort((a, b) => {
+            const avgA = averageSpecificCapacity(a[1]);
+            const avgB = averageSpecificCapacity(b[1]);
+            return (avgB || 0) - (avgA || 0) || String(a[0]).localeCompare(String(b[0]));
+          }).map(([uid, uidRows]) => ({
             name: uid,
+            preambleRows: specificCapacityPreamble(uid, uidRows),
             headers: sessionHeaders,
-            rows: uidRows.map(sessionRow)
+            rows: uidRows
+              .sort((a, b) => String(a.start_time).localeCompare(String(b.start_time)))
+              .map(sessionRow)
           }))
         ];
 
-        return multiSheetExcelResponse(sheets, "specific_capacity_by_uid_and_ward.xlsx");
+        const filename = requestedWardNo
+          ? `specific_capacity_ward_${normalizedRequestedWardNo || requestedWardNo}.xlsx`
+          : "specific_capacity_by_uid_and_ward.xlsx";
+        return multiSheetExcelResponse(sheets, filename);
+      }
+
+      if (url.pathname === "/api/specific-capacity/ward") {
+        const requestedWardNo = url.searchParams.get("ward_no");
+        if (!requestedWardNo) return json({ ward: null, sensors: [] }, 400);
+        const normalizedRequestedWardNo = normalizeWardNoValue(requestedWardNo);
+        const compactRows = await sql`
+          SELECT
+            u.uid,
+            COALESCE(NULLIF(s.ward_no, ''), NULLIF(q.ward_no, ''), NULLIF(a.ward_no, '')) AS ward_no,
+            COALESCE(NULLIF(s.ward_name, ''), NULLIF(q.ward_name, ''), NULLIF(a.ward_name, '')) AS ward_name,
+            COALESCE(u.lat, s.lat, q.lat, a.lat) AS lat,
+            COALESCE(u.lng, s.lng, q.lng, a.lng) AS lng,
+            u.payload_gzip
+          FROM uploaded_sensor_series u
+          LEFT JOIN sensors s ON s.uid = u.uid
+          LEFT JOIN sensor_qc_summary q ON q.uid = u.uid
+          LEFT JOIN sensor_ward_assignments a ON a.uid = u.uid
+          WHERE COALESCE(u.water_readings, 0) > 0
+            AND COALESCE(u.discharge_readings, 0) > 0
+            AND COALESCE(NULLIF(s.ward_no, ''), NULLIF(q.ward_no, ''), NULLIF(a.ward_no, '')) IS NOT NULL
+            AND regexp_replace(COALESCE(NULLIF(s.ward_no, ''), NULLIF(q.ward_no, ''), NULLIF(a.ward_no, '')), '\\.0+$', '') = ${normalizedRequestedWardNo}
+          ORDER BY u.uid
+        `;
+
+        const sensorRows = [];
+        for (const sensor of compactRows) {
+          const payload = await gunzipJsonPayload(sensor.payload_gzip);
+          const points = payload
+            .filter(point => point.time)
+            .sort((a, b) => String(a.time).localeCompare(String(b.time)));
+          const sessions = [];
+          let openSession = null;
+          for (const point of points) {
+            const offLevel = compactPointLevel(point, "off_level");
+            const onLevel = compactPointLevel(point, "on_level");
+            const discharge = compactPointDischarge(point);
+            if (offLevel !== null) {
+              openSession = { startTime: point.time, startLevelFt: offLevel, discharges: [] };
+            }
+            if (openSession && discharge !== null && discharge > 0) {
+              openSession.discharges.push(discharge);
+            }
+            if (openSession && onLevel !== null) {
+              const durationMin = minutesBetween(openSession.startTime, point.time);
+              const drawdownFt = onLevel - openSession.startLevelFt;
+              if (durationMin !== null && Math.round(durationMin) > 0 && drawdownFt > 0 && openSession.discharges.length) {
+                const drawdownM = drawdownFt * FT_TO_M;
+                const lowestDischargeM3s = Math.min(...openSession.discharges) * LPM_TO_M3_PER_SEC;
+                sessions.push({
+                  date: datePart(openSession.startTime),
+                  label: formatExcelDateTime(openSession.startTime),
+                  time: openSession.startTime,
+                  stopTime: point.time,
+                  durationMin: Math.round(durationMin),
+                  drawdownM: roundNumber(drawdownM, 3),
+                  lowestDischargeM3s: roundNumber(lowestDischargeM3s, 8),
+                  specificCapacityM2s: roundNumber(lowestDischargeM3s / drawdownM, 8)
+                });
+              }
+              openSession = null;
+            }
+          }
+          const values = sessions.map(item => Number(item.specificCapacityM2s)).filter(Number.isFinite);
+          if (!values.length) continue;
+          sensorRows.push({
+            uid: String(sensor.uid),
+            wardNo: sensor.ward_no,
+            wardName: sensor.ward_name,
+            lat: sensor.lat,
+            lng: sensor.lng,
+            validSessions: sessions.length,
+            averageSpecificCapacityM2s: roundNumber(values.reduce((sum, value) => sum + value, 0) / values.length, 8),
+            maxSpecificCapacityM2s: roundNumber(Math.max(...values), 8),
+            sessions
+          });
+        }
+
+        sensorRows.sort((a, b) => (b.averageSpecificCapacityM2s || 0) - (a.averageSpecificCapacityM2s || 0) || String(a.uid).localeCompare(String(b.uid)));
+        const allValues = sensorRows.flatMap(sensor => sensor.sessions.map(session => Number(session.specificCapacityM2s))).filter(Number.isFinite);
+        return json({
+          ward: sensorRows.length ? {
+            wardNo: sensorRows[0].wardNo,
+            wardName: sensorRows[0].wardName,
+            uidCount: sensorRows.length,
+            validSessions: sensorRows.reduce((sum, sensor) => sum + sensor.validSessions, 0),
+            averageSpecificCapacityM2s: allValues.length ? roundNumber(allValues.reduce((sum, value) => sum + value, 0) / allValues.length, 8) : null,
+            maxSpecificCapacityM2s: allValues.length ? roundNumber(Math.max(...allValues), 8) : null
+          } : null,
+          sensors: sensorRows
+        });
       }
 
       if (url.pathname === "/api/qc/wards") {
