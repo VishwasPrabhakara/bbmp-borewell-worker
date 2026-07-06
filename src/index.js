@@ -771,6 +771,167 @@ function tableExcelResponse(headers, rows, filename, sheetName = "Sheet1") {
   });
 }
 
+function safeExcelSheetName(value, fallback = "Sheet") {
+  const cleaned = String(value || fallback)
+    .replace(/[\[\]:*?/\\]/g, "_")
+    .slice(0, 31);
+  return cleaned || fallback;
+}
+
+function payloadBytes(value) {
+  if (!value) return new Uint8Array();
+  if (value instanceof Uint8Array) return value;
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (Array.isArray(value)) return new Uint8Array(value);
+  if (typeof value === "string") {
+    const hex = value.startsWith("\\x") ? value.slice(2) : value;
+    if (/^[0-9a-f]+$/i.test(hex) && hex.length % 2 === 0) {
+      const bytes = new Uint8Array(hex.length / 2);
+      for (let index = 0; index < bytes.length; index += 1) {
+        bytes[index] = parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+      }
+      return bytes;
+    }
+  }
+  return new Uint8Array(value);
+}
+
+async function gunzipJsonPayload(value) {
+  const bytes = payloadBytes(value);
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+  const text = await new Response(stream).text();
+  return JSON.parse(text);
+}
+
+function compactPointLevel(point, key) {
+  const lookup = {
+    off_level: "offLevel",
+    on_level: "onLevel",
+    water_level: "waterLevel"
+  };
+  const value = point[key] ?? point[lookup[key]];
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) ? numberValue : null;
+}
+
+function compactPointDischarge(point) {
+  const numberValue = Number(point.discharge);
+  return Number.isFinite(numberValue) ? numberValue : null;
+}
+
+function minutesBetween(start, stop) {
+  const startDate = new Date(start);
+  const stopDate = new Date(stop);
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(stopDate.getTime())) return null;
+  return (stopDate.getTime() - startDate.getTime()) / 60000;
+}
+
+function multiSheetExcelResponse(sheets, filename) {
+  const usedNames = new Set();
+  const normalizedSheets = sheets.map((sheet, index) => {
+    const baseName = safeExcelSheetName(sheet.name, `Sheet${index + 1}`);
+    let name = baseName;
+    let suffix = 2;
+    while (usedNames.has(name)) {
+      name = `${baseName.slice(0, 28)}_${suffix}`;
+      suffix += 1;
+    }
+    usedNames.add(name);
+    return { ...sheet, name };
+  });
+
+  const worksheetXml = (sheet) => {
+    const headers = sheet.headers || [];
+    const rows = sheet.rows || [];
+    const sheetRows = [
+      `<row r="1">${headers.map((header, index) => inlineCell(1, index + 1, header, 2)).join("")}</row>`
+    ];
+
+    rows.forEach((row, rowIndex) => {
+      const excelRow = rowIndex + 2;
+      const cells = row.map((value, colIndex) => {
+        if (typeof value === "number" && Number.isFinite(value)) {
+          return numberCell(excelRow, colIndex + 1, value, 4);
+        }
+        return inlineCell(excelRow, colIndex + 1, value, 3);
+      });
+      sheetRows.push(`<row r="${excelRow}">${cells.join("")}</row>`);
+    });
+
+    const maxColumn = Math.max(headers.length, 1);
+    const maxRow = Math.max(rows.length + 1, 1);
+    const cols = `<col min="1" max="${maxColumn}" width="20" customWidth="1"/>`;
+    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <dimension ref="A1:${cellAddress(maxRow, maxColumn)}"/>
+  <sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
+  <cols>${cols}</cols>
+  <sheetData>${sheetRows.join("")}</sheetData>
+</worksheet>`;
+  };
+
+  const workbookSheets = normalizedSheets.map((sheet, index) =>
+    `<sheet name="${xmlEscape(sheet.name)}" sheetId="${index + 1}" r:id="rId${index + 1}"/>`
+  ).join("");
+
+  const workbook = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>${workbookSheets}</sheets>
+</workbook>`;
+
+  const styles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts>
+  <fills count="4"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE7E6E6"/><bgColor indexed="64"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFD9E2F3"/><bgColor indexed="64"/></patternFill></fill></fills>
+  <borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border><border><left style="thin"><color rgb="FF9CA3AF"/></left><right style="thin"><color rgb="FF9CA3AF"/></right><top style="thin"><color rgb="FF9CA3AF"/></top><bottom style="thin"><color rgb="FF9CA3AF"/></bottom><diagonal/></border></borders>
+  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="5">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>
+    <xf numFmtId="0" fontId="1" fillId="2" borderId="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+    <xf numFmtId="0" fontId="1" fillId="3" borderId="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="1" applyBorder="1"/>
+    <xf numFmtId="2" fontId="0" fillId="0" borderId="1" applyNumberFormat="1" applyBorder="1"/>
+  </cellXfs>
+  <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
+</styleSheet>`;
+
+  const contentTypeOverrides = normalizedSheets.map((_, index) =>
+    `<Override PartName="/xl/worksheets/sheet${index + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`
+  ).join("");
+  const workbookRels = normalizedSheets.map((_, index) =>
+    `<Relationship Id="rId${index + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${index + 1}.xml"/>`
+  ).join("");
+
+  const files = [
+    {
+      name: "[Content_Types].xml",
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>${contentTypeOverrides}<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`
+    },
+    {
+      name: "_rels/.rels",
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`
+    },
+    { name: "xl/workbook.xml", data: workbook },
+    {
+      name: "xl/_rels/workbook.xml.rels",
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${workbookRels}<Relationship Id="rId${normalizedSheets.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`
+    },
+    { name: "xl/styles.xml", data: styles },
+    ...normalizedSheets.map((sheet, index) => ({
+      name: `xl/worksheets/sheet${index + 1}.xml`,
+      data: worksheetXml(sheet)
+    }))
+  ];
+
+  return new Response(makeZip(files), {
+    headers: {
+      "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "content-disposition": `attachment; filename="${filename}"`,
+      "access-control-allow-origin": "*"
+    }
+  });
+}
+
 function weeklyLevelsExcelResponse(rows, filename) {
   const monthMap = new Map();
   const sensorMap = new Map();
@@ -1941,6 +2102,272 @@ export default {
           row.lng
         ]);
         return tableExcelResponse(headers, csvRows, "not_usable_sensor_qc_reasons.xlsx", "Not Usable Sensors");
+      }
+
+      if (url.pathname === "/api/specific-capacity/wards.xlsx") {
+        let rows = await sql`
+          WITH both_sensors AS (
+            SELECT
+              s.uid,
+              COALESCE(NULLIF(s.ward_no, ''), NULLIF(q.ward_no, ''), NULLIF(a.ward_no, '')) AS ward_no,
+              COALESCE(NULLIF(s.ward_name, ''), NULLIF(q.ward_name, ''), NULLIF(a.ward_name, '')) AS ward_name,
+              s.lat,
+              s.lng
+            FROM sensors s
+            LEFT JOIN sensor_qc_summary q ON q.uid = s.uid
+            LEFT JOIN sensor_ward_assignments a ON a.uid = s.uid
+            WHERE COALESCE(s.water_readings, 0) > 0
+              AND COALESCE(s.discharge_readings, 0) > 0
+          ),
+          sessions AS (
+            SELECT
+              b.uid,
+              bs.ward_no,
+              bs.ward_name,
+              bs.lat,
+              bs.lng,
+              b.start_time,
+              b.stop_time,
+              b.water_level_start_ft,
+              b.water_level_stop_ft,
+              COALESCE(
+                b.session_duration_min,
+                EXTRACT(EPOCH FROM (b.stop_time - b.start_time)) / 60.0
+              ) AS duration_min,
+              b.water_level_stop_ft - b.water_level_start_ft AS drawdown_ft
+            FROM uploaded_type_b_sessions b
+            JOIN both_sensors bs ON bs.uid = b.uid
+            WHERE b.start_time IS NOT NULL
+              AND b.stop_time IS NOT NULL
+              AND b.water_level_start_ft IS NOT NULL
+              AND b.water_level_stop_ft IS NOT NULL
+              AND bs.ward_no IS NOT NULL
+              AND bs.ward_no <> ''
+          ),
+          session_discharge AS (
+            SELECT
+              s.*,
+              MIN(a.discharge) AS min_discharge_lpm,
+              AVG(a.discharge) AS avg_discharge_lpm,
+              MAX(a.discharge) AS max_discharge_lpm,
+              COUNT(a.discharge) AS discharge_readings_in_session
+            FROM sessions s
+            JOIN uploaded_type_a_readings a
+              ON a.uid = s.uid
+             AND a.time >= s.start_time
+             AND a.time <= s.stop_time
+             AND a.discharge IS NOT NULL
+             AND a.discharge > 0
+            GROUP BY
+              s.uid, s.ward_no, s.ward_name, s.lat, s.lng, s.start_time, s.stop_time,
+              s.water_level_start_ft, s.water_level_stop_ft, s.duration_min, s.drawdown_ft
+          )
+          SELECT
+            ward_no,
+            ward_name,
+            uid,
+            lat,
+            lng,
+            start_time,
+            stop_time,
+            duration_min,
+            water_level_start_ft,
+            water_level_stop_ft,
+            drawdown_ft,
+            min_discharge_lpm,
+            avg_discharge_lpm,
+            max_discharge_lpm,
+            discharge_readings_in_session,
+            min_discharge_lpm / drawdown_ft AS specific_capacity_lpm_per_ft
+          FROM session_discharge
+          WHERE drawdown_ft > 0
+          ORDER BY
+            NULLIF(regexp_replace(ward_no, '[^0-9]', '', 'g'), '')::int NULLS LAST,
+            ward_no,
+            ward_name,
+            uid,
+            start_time
+        `;
+
+        if (!rows.length) {
+          const compactRows = await sql`
+            SELECT
+              u.uid,
+              COALESCE(NULLIF(s.ward_no, ''), NULLIF(q.ward_no, ''), NULLIF(a.ward_no, '')) AS ward_no,
+              COALESCE(NULLIF(s.ward_name, ''), NULLIF(q.ward_name, ''), NULLIF(a.ward_name, '')) AS ward_name,
+              COALESCE(u.lat, s.lat, q.lat, a.lat) AS lat,
+              COALESCE(u.lng, s.lng, q.lng, a.lng) AS lng,
+              u.payload_gzip
+            FROM uploaded_sensor_series u
+            LEFT JOIN sensors s ON s.uid = u.uid
+            LEFT JOIN sensor_qc_summary q ON q.uid = u.uid
+            LEFT JOIN sensor_ward_assignments a ON a.uid = u.uid
+            WHERE COALESCE(u.water_readings, 0) > 0
+              AND COALESCE(u.discharge_readings, 0) > 0
+              AND COALESCE(NULLIF(s.ward_no, ''), NULLIF(q.ward_no, ''), NULLIF(a.ward_no, '')) IS NOT NULL
+            ORDER BY COALESCE(NULLIF(s.ward_no, ''), NULLIF(q.ward_no, ''), NULLIF(a.ward_no, '')), u.uid
+          `;
+
+          const payloadRows = [];
+          for (const sensor of compactRows) {
+            const payload = await gunzipJsonPayload(sensor.payload_gzip);
+            const points = payload
+              .filter(point => point.time)
+              .sort((a, b) => String(a.time).localeCompare(String(b.time)));
+            let openSession = null;
+            for (const point of points) {
+              const offLevel = compactPointLevel(point, "off_level");
+              const onLevel = compactPointLevel(point, "on_level");
+              const discharge = compactPointDischarge(point);
+
+              if (offLevel !== null) {
+                openSession = {
+                  start_time: point.time,
+                  water_level_start_ft: offLevel,
+                  discharges: []
+                };
+              }
+
+              if (openSession && discharge !== null && discharge > 0) {
+                openSession.discharges.push(discharge);
+              }
+
+              if (openSession && onLevel !== null) {
+                const drawdown = onLevel - openSession.water_level_start_ft;
+                const discharges = openSession.discharges;
+                if (drawdown > 0 && discharges.length) {
+                  payloadRows.push({
+                    ward_no: sensor.ward_no,
+                    ward_name: sensor.ward_name,
+                    uid: sensor.uid,
+                    lat: sensor.lat,
+                    lng: sensor.lng,
+                    start_time: openSession.start_time,
+                    stop_time: point.time,
+                    duration_min: minutesBetween(openSession.start_time, point.time),
+                    water_level_start_ft: openSession.water_level_start_ft,
+                    water_level_stop_ft: onLevel,
+                    drawdown_ft: drawdown,
+                    min_discharge_lpm: Math.min(...discharges),
+                    avg_discharge_lpm: discharges.reduce((sum, value) => sum + value, 0) / discharges.length,
+                    max_discharge_lpm: Math.max(...discharges),
+                    discharge_readings_in_session: discharges.length,
+                    specific_capacity_lpm_per_ft: Math.min(...discharges) / drawdown
+                  });
+                }
+                openSession = null;
+              }
+            }
+          }
+          rows = payloadRows.sort((a, b) => {
+            const wardA = Number(a.ward_no);
+            const wardB = Number(b.ward_no);
+            if (Number.isFinite(wardA) && Number.isFinite(wardB) && wardA !== wardB) return wardA - wardB;
+            return String(a.ward_no).localeCompare(String(b.ward_no))
+              || String(a.uid).localeCompare(String(b.uid))
+              || String(a.start_time).localeCompare(String(b.start_time));
+          });
+        }
+
+        const sessionHeaders = [
+          "Ward No",
+          "Ward Name",
+          "UID",
+          "Latitude",
+          "Longitude",
+          "Pump Start",
+          "Pump Stop",
+          "Duration (min)",
+          "Start Water Level (ft)",
+          "Stop Water Level (ft)",
+          "Drawdown / Drop (ft)",
+          "Minimum Discharge (LPM)",
+          "Average Discharge (LPM)",
+          "Maximum Discharge (LPM)",
+          "Discharge Readings in Session",
+          "Specific Capacity (LPM/ft)"
+        ];
+
+        const wardGroups = new Map();
+        const uidGroups = new Map();
+        for (const row of rows) {
+          const wardKey = `${row.ward_no || ""}|${row.ward_name || ""}`;
+          if (!wardGroups.has(wardKey)) wardGroups.set(wardKey, []);
+          wardGroups.get(wardKey).push(row);
+          const uidKey = String(row.uid);
+          if (!uidGroups.has(uidKey)) uidGroups.set(uidKey, []);
+          uidGroups.get(uidKey).push(row);
+        }
+
+        const wardSummaryRows = Array.from(wardGroups.entries()).map(([wardKey, wardRows]) => {
+          const [wardNo, wardName] = wardKey.split("|");
+          const capacities = wardRows
+            .map(row => Number(row.specific_capacity_lpm_per_ft))
+            .filter(value => Number.isFinite(value));
+          const drawdowns = wardRows
+            .map(row => Number(row.drawdown_ft))
+            .filter(value => Number.isFinite(value));
+          return [
+            wardNo,
+            wardName,
+            new Set(wardRows.map(row => row.uid)).size,
+            wardRows.length,
+            roundNumber(median(capacities), 2),
+            roundNumber(capacities.reduce((sum, value) => sum + value, 0) / capacities.length, 2),
+            roundNumber(Math.min(...capacities), 2),
+            roundNumber(Math.max(...capacities), 2),
+            roundNumber(median(drawdowns), 2)
+          ];
+        }).sort((a, b) => {
+          const wardA = Number(a[0]);
+          const wardB = Number(b[0]);
+          if (Number.isFinite(wardA) && Number.isFinite(wardB) && wardA !== wardB) return wardA - wardB;
+          return String(a[0]).localeCompare(String(b[0]));
+        });
+
+        const sessionRow = row => [
+          row.ward_no,
+          row.ward_name,
+          row.uid,
+          roundNumber(row.lat, 6),
+          roundNumber(row.lng, 6),
+          formatExcelDateTime(row.start_time),
+          formatExcelDateTime(row.stop_time),
+          roundNumber(row.duration_min, 2),
+          roundNumber(row.water_level_start_ft, 2),
+          roundNumber(row.water_level_stop_ft, 2),
+          roundNumber(row.drawdown_ft, 2),
+          roundNumber(row.min_discharge_lpm, 2),
+          roundNumber(row.avg_discharge_lpm, 2),
+          roundNumber(row.max_discharge_lpm, 2),
+          Number(row.discharge_readings_in_session || 0),
+          roundNumber(row.specific_capacity_lpm_per_ft, 2)
+        ];
+
+        const sheets = [
+          {
+            name: "Ward Summary",
+            headers: [
+              "Ward No",
+              "Ward Name",
+              "UID Count",
+              "Valid Pumping Sessions",
+              "Median Specific Capacity (LPM/ft)",
+              "Average Specific Capacity (LPM/ft)",
+              "Minimum Specific Capacity (LPM/ft)",
+              "Maximum Specific Capacity (LPM/ft)",
+              "Median Drawdown / Drop (ft)"
+            ],
+            rows: wardSummaryRows
+          },
+          ...Array.from(uidGroups.entries()).sort((a, b) => String(a[0]).localeCompare(String(b[0]))).map(([uid, uidRows]) => ({
+            name: uid,
+            headers: sessionHeaders,
+            rows: uidRows.map(sessionRow)
+          }))
+        ];
+
+        return multiSheetExcelResponse(sheets, "specific_capacity_by_uid_and_ward.xlsx");
       }
 
       if (url.pathname === "/api/qc/wards") {
