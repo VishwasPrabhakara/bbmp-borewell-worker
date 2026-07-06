@@ -855,8 +855,11 @@ function convertedSpecificCapacity(row) {
   };
 }
 
-function inverseSpecificCapacity(value) {
-  return value ? 1 / value : null;
+function inverseSpecificCapacity(specificCapacityValue, drawdownM = null, lowestDischargeM3s = null) {
+  if (drawdownM !== null && lowestDischargeM3s !== null && lowestDischargeM3s > 0) {
+    return drawdownM / lowestDischargeM3s;
+  }
+  return specificCapacityValue ? 1 / specificCapacityValue : null;
 }
 
 function averageSpecificCapacity(rows) {
@@ -886,6 +889,19 @@ function averagePumpingMinutesPerDay(rows) {
   return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
 }
 
+function maxPumpingMinutesPerDay(rows) {
+  const daily = new Map();
+  for (const row of rows || []) {
+    const duration = Number(row.duration_min ?? row.durationMin);
+    const time = row.start_time || row.time;
+    if (!Number.isFinite(duration) || !time) continue;
+    const day = datePart(time);
+    daily.set(day, (daily.get(day) || 0) + Math.round(duration));
+  }
+  const values = Array.from(daily.values());
+  return values.length ? Math.max(...values) : null;
+}
+
 function specificCapacityPreamble(uid, rows) {
   const first = rows[0] || {};
   return [
@@ -896,6 +912,7 @@ function specificCapacityPreamble(uid, rows) {
     ["Longitude", first.lng || ""],
     ["Valid pumping sessions", rows.length],
     ["Average Pumping Time per Day (min/day)", roundNumber(averagePumpingMinutesPerDay(rows), 1)],
+    ["Maximum Pumping Time per Day (min/day)", roundNumber(maxPumpingMinutesPerDay(rows), 1)],
     ["Average Specific Capacity (m2/s)", roundNumber(averageSpecificCapacity(rows), 8)],
     ["Maximum Specific Capacity (m2/s)", roundNumber(maxSpecificCapacity(rows), 8)],
     [],
@@ -905,7 +922,7 @@ function specificCapacityPreamble(uid, rows) {
     ["Drawdown / Drop (m) = (Stop water level below ground - Start water level below ground) x 0.3048"],
     ["Lowest discharge (m3/s) = lowest discharge during that pumping session x 1/60000"],
     ["Specific Capacity (m2/s) = Lowest discharge (m3/s) / Drawdown (m)"],
-    ["Inverse Specific Capacity (s/m2) = 1 / Specific Capacity (m2/s)"],
+    ["Inverse Specific Capacity (s/m2) = Drawdown (m) / Lowest discharge (m3/s)"],
     []
   ];
 }
@@ -2427,8 +2444,11 @@ export default {
           const capacities = wardRows
             .map(row => convertedSpecificCapacity(row).specificCapacityM3sPerM)
             .filter(value => Number.isFinite(value));
-          const inverseCapacities = capacities
-            .map(value => inverseSpecificCapacity(value))
+          const inverseCapacities = wardRows
+            .map(row => {
+              const converted = convertedSpecificCapacity(row);
+              return inverseSpecificCapacity(converted.specificCapacityM3sPerM, converted.drawdownM, converted.lowestDischargeM3s);
+            })
             .filter(value => Number.isFinite(value));
           const drawdowns = wardRows
             .map(row => convertedSpecificCapacity(row).drawdownM)
@@ -2479,7 +2499,7 @@ export default {
             roundNumber(converted.lowestDischargeM3s, 8),
             Number(row.discharge_readings_in_session || 0),
             roundNumber(converted.specificCapacityM3sPerM, 8),
-            roundNumber(inverseSpecificCapacity(converted.specificCapacityM3sPerM), 2)
+            roundNumber(inverseSpecificCapacity(converted.specificCapacityM3sPerM, converted.drawdownM, converted.lowestDischargeM3s), 2)
           ];
         };
 
@@ -2556,6 +2576,8 @@ export default {
               if (durationMin !== null && Math.round(durationMin) > 0 && drawdownFt > 0 && openSession.discharges.length) {
                 const drawdownM = drawdownFt * FT_TO_M;
                 const lowestDischargeM3s = Math.min(...openSession.discharges) * LPM_TO_M3_PER_SEC;
+                const specificCapacityM2s = lowestDischargeM3s / drawdownM;
+                const inverseCapacitySPerM2 = inverseSpecificCapacity(specificCapacityM2s, drawdownM, lowestDischargeM3s);
                 sessions.push({
                   date: datePart(openSession.startTime),
                   label: formatExcelDateTime(openSession.startTime),
@@ -2564,14 +2586,15 @@ export default {
                   durationMin: Math.round(durationMin),
                   drawdownM: roundNumber(drawdownM, 3),
                   lowestDischargeM3s: roundNumber(lowestDischargeM3s, 8),
-                  specificCapacityM2s: roundNumber(lowestDischargeM3s / drawdownM, 8),
-                  inverseSpecificCapacitySPerM2: roundNumber(inverseSpecificCapacity(lowestDischargeM3s / drawdownM), 2)
+                  specificCapacityM2s: roundNumber(specificCapacityM2s, 8),
+                  inverseSpecificCapacitySPerM2: roundNumber(inverseCapacitySPerM2, 2)
                 });
               }
               openSession = null;
             }
           }
           const values = sessions.map(item => Number(item.specificCapacityM2s)).filter(Number.isFinite);
+          const inverseValues = sessions.map(item => Number(item.inverseSpecificCapacitySPerM2)).filter(Number.isFinite);
           if (!values.length) continue;
           sensorRows.push({
             uid: String(sensor.uid),
@@ -2581,17 +2604,18 @@ export default {
             lng: sensor.lng,
             validSessions: sessions.length,
             averagePumpingMinutesPerDay: roundNumber(averagePumpingMinutesPerDay(sessions), 1),
+            maxPumpingMinutesPerDay: roundNumber(maxPumpingMinutesPerDay(sessions), 1),
             averageSpecificCapacityM2s: roundNumber(values.reduce((sum, value) => sum + value, 0) / values.length, 8),
             maxSpecificCapacityM2s: roundNumber(Math.max(...values), 8),
-            averageInverseSpecificCapacitySPerM2: roundNumber(values.map(inverseSpecificCapacity).reduce((sum, value) => sum + value, 0) / values.length, 2),
-            maxInverseSpecificCapacitySPerM2: roundNumber(Math.max(...values.map(inverseSpecificCapacity)), 2),
+            averageInverseSpecificCapacitySPerM2: roundNumber(inverseValues.reduce((sum, value) => sum + value, 0) / inverseValues.length, 2),
+            maxInverseSpecificCapacitySPerM2: roundNumber(Math.max(...inverseValues), 2),
             sessions
           });
         }
 
         sensorRows.sort((a, b) => (b.averageSpecificCapacityM2s || 0) - (a.averageSpecificCapacityM2s || 0) || String(a.uid).localeCompare(String(b.uid)));
         const allValues = sensorRows.flatMap(sensor => sensor.sessions.map(session => Number(session.specificCapacityM2s))).filter(Number.isFinite);
-        const allInverseValues = allValues.map(inverseSpecificCapacity).filter(Number.isFinite);
+        const allInverseValues = sensorRows.flatMap(sensor => sensor.sessions.map(session => Number(session.inverseSpecificCapacitySPerM2))).filter(Number.isFinite);
         return json({
           ward: sensorRows.length ? {
             wardNo: sensorRows[0].wardNo,
