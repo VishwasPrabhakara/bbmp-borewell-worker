@@ -993,6 +993,35 @@ function cleanedDaySessions(rows) {
   return Array.from(deduped.values());
 }
 
+function cleanedSpecificCapacitySessions(sessions) {
+  const deduped = new Map();
+  for (const session of sessions.sort((a, b) => String(a.time).localeCompare(String(b.time)))) {
+    if (!Number.isFinite(Number(session.drawdownM)) || Number(session.drawdownM) < MIN_MONTHLY_DRAWDOWN_M) continue;
+    const key = [
+      session.date,
+      roundNumber(session.startWaterLevelM, 1),
+      roundNumber(session.stopWaterLevelM, 1)
+    ].join("|");
+    const existing = deduped.get(key);
+    if (!existing) {
+      deduped.set(key, session);
+      continue;
+    }
+    const currentDischarge = Number(session.lowestDischargeM3s);
+    const existingDischarge = Number(existing.lowestDischargeM3s);
+    const currentDuration = Number(session.durationSeconds || 0);
+    const existingDuration = Number(existing.durationSeconds || 0);
+    if (
+      !Number.isFinite(existingDischarge)
+      || (Number.isFinite(currentDischarge) && currentDischarge < existingDischarge)
+      || (currentDischarge === existingDischarge && currentDuration > existingDuration)
+    ) {
+      deduped.set(key, session);
+    }
+  }
+  return Array.from(deduped.values());
+}
+
 function sessionDayValue(rows, field) {
   const values = cleanedDaySessions(rows)
     .sort((a, b) => String(a.start_time).localeCompare(String(b.start_time)))
@@ -2672,6 +2701,10 @@ export default {
               const drawdownFt = onLevel - offLevel;
               if (sameRecordDurationMin !== null && Math.round(sameRecordDurationMin) > 0 && drawdownFt > 0) {
                 const drawdownM = drawdownFt * FT_TO_M;
+                if (drawdownM < MIN_MONTHLY_DRAWDOWN_M) {
+                  openSession = null;
+                  continue;
+                }
                 const lowestDischargeM3s = discharge * LPM_TO_M3_PER_SEC;
                 const specificCapacityM2s = lowestDischargeM3s / drawdownM;
                 const inverseCapacitySPerM2 = inverseSpecificCapacity(specificCapacityM2s, drawdownM, lowestDischargeM3s);
@@ -2681,9 +2714,13 @@ export default {
                   time: point.time,
                   stopTime: point.stop_time || point.time,
                   durationMin: Math.round(sameRecordDurationMin),
+                  durationSeconds: Math.round(sameRecordDurationMin * 60),
+                  startWaterLevelM: roundNumber(offLevel * FT_TO_M, 3),
+                  stopWaterLevelM: roundNumber(onLevel * FT_TO_M, 3),
                   drawdownM: roundNumber(drawdownM, 3),
                   lowestDischargeM3s: roundNumber(lowestDischargeM3s, 8),
                   specificCapacityM2s: roundNumber(specificCapacityM2s, 8),
+                  transmissivityScaled: roundNumber(specificCapacityM2s * TRANSMISSIVITY_SCALE, 4),
                   inverseSpecificCapacitySPerM2: roundNumber(inverseCapacitySPerM2, 2)
                 });
                 openSession = null;
@@ -2702,6 +2739,10 @@ export default {
               bridgedSessionCandidateCount += 1;
               if (durationMin !== null && Math.round(durationMin) > 0 && drawdownFt > 0 && openSession.discharges.length) {
                 const drawdownM = drawdownFt * FT_TO_M;
+                if (drawdownM < MIN_MONTHLY_DRAWDOWN_M) {
+                  openSession = null;
+                  continue;
+                }
                 const lowestDischargeM3s = Math.min(...openSession.discharges) * LPM_TO_M3_PER_SEC;
                 const specificCapacityM2s = lowestDischargeM3s / drawdownM;
                 const inverseCapacitySPerM2 = inverseSpecificCapacity(specificCapacityM2s, drawdownM, lowestDischargeM3s);
@@ -2711,17 +2752,22 @@ export default {
                   time: openSession.startTime,
                   stopTime: point.time,
                   durationMin: Math.round(durationMin),
+                  durationSeconds: Math.round(durationMin * 60),
+                  startWaterLevelM: roundNumber(openSession.startLevelFt * FT_TO_M, 3),
+                  stopWaterLevelM: roundNumber(onLevel * FT_TO_M, 3),
                   drawdownM: roundNumber(drawdownM, 3),
                   lowestDischargeM3s: roundNumber(lowestDischargeM3s, 8),
                   specificCapacityM2s: roundNumber(specificCapacityM2s, 8),
+                  transmissivityScaled: roundNumber(specificCapacityM2s * TRANSMISSIVITY_SCALE, 4),
                   inverseSpecificCapacitySPerM2: roundNumber(inverseCapacitySPerM2, 2)
                 });
               }
               openSession = null;
             }
           }
-          const values = sessions.map(item => Number(item.specificCapacityM2s)).filter(Number.isFinite);
-          const inverseValues = sessions.map(item => Number(item.inverseSpecificCapacitySPerM2)).filter(Number.isFinite);
+          const cleanedSessions = cleanedSpecificCapacitySessions(sessions);
+          const values = cleanedSessions.map(item => Number(item.specificCapacityM2s)).filter(Number.isFinite);
+          const inverseValues = cleanedSessions.map(item => Number(item.inverseSpecificCapacitySPerM2)).filter(Number.isFinite);
           if (!values.length) {
             skippedSensors.push({
               uid: String(sensor.uid),
@@ -2739,14 +2785,16 @@ export default {
             wardName: sensor.ward_name,
             lat: sensor.lat,
             lng: sensor.lng,
-            validSessions: sessions.length,
-            averagePumpingMinutesPerDay: roundNumber(averagePumpingMinutesPerDay(sessions), 1),
-            maxPumpingMinutesPerDay: roundNumber(maxPumpingMinutesPerDay(sessions), 1),
+            validSessions: cleanedSessions.length,
+            averagePumpingMinutesPerDay: roundNumber(averagePumpingMinutesPerDay(cleanedSessions), 1),
+            maxPumpingMinutesPerDay: roundNumber(maxPumpingMinutesPerDay(cleanedSessions), 1),
             averageSpecificCapacityM2s: roundNumber(values.reduce((sum, value) => sum + value, 0) / values.length, 8),
             maxSpecificCapacityM2s: roundNumber(Math.max(...values), 8),
+            averageTransmissivityScaled: roundNumber((values.reduce((sum, value) => sum + value, 0) / values.length) * TRANSMISSIVITY_SCALE, 4),
+            maxTransmissivityScaled: roundNumber(Math.max(...values) * TRANSMISSIVITY_SCALE, 4),
             averageInverseSpecificCapacitySPerM2: roundNumber(inverseValues.reduce((sum, value) => sum + value, 0) / inverseValues.length, 2),
             maxInverseSpecificCapacitySPerM2: roundNumber(Math.max(...inverseValues), 2),
-            sessions
+            sessions: cleanedSessions
           });
         }
 
@@ -2761,6 +2809,8 @@ export default {
             validSessions: sensorRows.reduce((sum, sensor) => sum + sensor.validSessions, 0),
             averageSpecificCapacityM2s: allValues.length ? roundNumber(allValues.reduce((sum, value) => sum + value, 0) / allValues.length, 8) : null,
             maxSpecificCapacityM2s: allValues.length ? roundNumber(Math.max(...allValues), 8) : null,
+            averageTransmissivityScaled: allValues.length ? roundNumber((allValues.reduce((sum, value) => sum + value, 0) / allValues.length) * TRANSMISSIVITY_SCALE, 4) : null,
+            maxTransmissivityScaled: allValues.length ? roundNumber(Math.max(...allValues) * TRANSMISSIVITY_SCALE, 4) : null,
             averageInverseSpecificCapacitySPerM2: allInverseValues.length ? roundNumber(allInverseValues.reduce((sum, value) => sum + value, 0) / allInverseValues.length, 2) : null,
             maxInverseSpecificCapacitySPerM2: allInverseValues.length ? roundNumber(Math.max(...allInverseValues), 2) : null
           } : null,
