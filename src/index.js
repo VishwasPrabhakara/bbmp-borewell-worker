@@ -4,6 +4,8 @@ const FRESHNESS_HOURS = 6;
 const RUNNING_TIMEOUT_MINUTES = 30;
 const FT_TO_M = 0.3048;
 const LPM_TO_M3_PER_SEC = 1 / 60000;
+const TRANSMISSIVITY_SCALE = 1000000;
+const MIN_MONTHLY_DRAWDOWN_M = 0.3;
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -942,14 +944,14 @@ function specificCapacityPreamble(uid, rows) {
 }
 
 const MONTHLY_SPECIFIC_CAPACITY_HEADERS = [
-  "Start Water Level",
-  "Stop Water Level",
-  "Start Discharge",
-  "Stop Discharge",
-  "Lowest Discharge",
-  "Pumping Duration",
-  "Transmissivity",
-  "Inverse of Transmissivity"
+  "Start Water Level (m)",
+  "Stop Water Level (m)",
+  "Start Discharge (m3/s)",
+  "Stop Discharge (m3/s)",
+  "Lowest Discharge (m3/s)",
+  "Pumping Duration (s)",
+  "Transmissivity (x10^-6 m2/s)",
+  "Inverse of Transmissivity (s/m2)"
 ];
 
 function monthLabelFromDatePart(day) {
@@ -964,27 +966,54 @@ function dayLabelFromDatePart(day) {
   return `${monthName} ${date} ${year}`;
 }
 
+function cleanedDaySessions(rows) {
+  const deduped = new Map();
+  for (const row of rows.sort((a, b) => String(a.start_time).localeCompare(String(b.start_time)))) {
+    const converted = convertedSpecificCapacity(row);
+    if (!Number.isFinite(converted.drawdownM) || converted.drawdownM < MIN_MONTHLY_DRAWDOWN_M) continue;
+    const key = `${roundNumber(converted.startWaterLevelM, 1)}|${roundNumber(converted.stopWaterLevelM, 1)}`;
+    const existing = deduped.get(key);
+    if (!existing) {
+      deduped.set(key, row);
+      continue;
+    }
+    const existingConverted = convertedSpecificCapacity(existing);
+    const currentDischarge = converted.lowestDischargeM3s;
+    const existingDischarge = existingConverted.lowestDischargeM3s;
+    const currentDuration = Number(row.duration_min || 0);
+    const existingDuration = Number(existing.duration_min || 0);
+    if (
+      !Number.isFinite(existingDischarge)
+      || (Number.isFinite(currentDischarge) && currentDischarge < existingDischarge)
+      || (currentDischarge === existingDischarge && currentDuration > existingDuration)
+    ) {
+      deduped.set(key, row);
+    }
+  }
+  return Array.from(deduped.values());
+}
+
 function sessionDayValue(rows, field) {
-  const values = rows
+  const values = cleanedDaySessions(rows)
     .sort((a, b) => String(a.start_time).localeCompare(String(b.start_time)))
     .map(row => {
       const converted = convertedSpecificCapacity(row);
       const startDischarge = Number(row.start_discharge_lpm ?? row.min_discharge_lpm);
       const stopDischarge = Number(row.stop_discharge_lpm ?? row.min_discharge_lpm);
       const map = {
-        "Start Water Level": roundNumber(converted.startWaterLevelM, 3),
-        "Stop Water Level": roundNumber(converted.stopWaterLevelM, 3),
-        "Start Discharge": Number.isFinite(startDischarge) ? roundNumber(startDischarge * LPM_TO_M3_PER_SEC, 8) : "",
-        "Stop Discharge": Number.isFinite(stopDischarge) ? roundNumber(stopDischarge * LPM_TO_M3_PER_SEC, 8) : "",
-        "Lowest Discharge": roundNumber(converted.lowestDischargeM3s, 8),
-        "Pumping Duration": row.duration_min == null ? "" : Math.round(Number(row.duration_min)),
-        "Transmissivity": roundNumber(converted.specificCapacityM3sPerM, 8),
-        "Inverse of Transmissivity": roundNumber(inverseSpecificCapacity(converted.specificCapacityM3sPerM, converted.drawdownM, converted.lowestDischargeM3s), 2)
+        "Start Water Level (m)": roundNumber(converted.startWaterLevelM, 3),
+        "Stop Water Level (m)": roundNumber(converted.stopWaterLevelM, 3),
+        "Start Discharge (m3/s)": Number.isFinite(startDischarge) ? roundNumber(startDischarge * LPM_TO_M3_PER_SEC, 8) : "",
+        "Stop Discharge (m3/s)": Number.isFinite(stopDischarge) ? roundNumber(stopDischarge * LPM_TO_M3_PER_SEC, 8) : "",
+        "Lowest Discharge (m3/s)": roundNumber(converted.lowestDischargeM3s, 8),
+        "Pumping Duration (s)": row.duration_min == null ? "" : Math.round(Number(row.duration_min) * 60),
+        "Transmissivity (x10^-6 m2/s)": Number.isFinite(converted.specificCapacityM3sPerM) ? roundNumber(converted.specificCapacityM3sPerM * TRANSMISSIVITY_SCALE, 4) : "",
+        "Inverse of Transmissivity (s/m2)": roundNumber(inverseSpecificCapacity(converted.specificCapacityM3sPerM, converted.drawdownM, converted.lowestDischargeM3s), 2)
       };
       return map[field];
     })
     .filter(value => value !== null && value !== undefined && value !== "");
-  return values.join("\n");
+  return values.join("\n---\n");
 }
 
 function monthlySpecificCapacitySheets(rows) {
