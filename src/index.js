@@ -941,6 +941,120 @@ function specificCapacityPreamble(uid, rows) {
   ];
 }
 
+const MONTHLY_SPECIFIC_CAPACITY_HEADERS = [
+  "Start Water Level",
+  "Stop Water Level",
+  "Start Discharge",
+  "Stop Discharge",
+  "Lowest Discharge",
+  "Pumping Duration",
+  "Transmissivity",
+  "Inverse of Transmissivity"
+];
+
+function monthLabelFromDatePart(day) {
+  const [year, month] = String(day).split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, 1));
+  return `${date.toLocaleString("en-US", { month: "short", timeZone: "UTC" })} ${year}`;
+}
+
+function dayLabelFromDatePart(day) {
+  const [year, month, date] = String(day).split("-").map(Number);
+  const monthName = new Date(Date.UTC(year, month - 1, 1)).toLocaleString("en-US", { month: "short", timeZone: "UTC" }).toUpperCase();
+  return `${monthName} ${date} ${year}`;
+}
+
+function sessionDayValue(rows, field) {
+  const values = rows
+    .sort((a, b) => String(a.start_time).localeCompare(String(b.start_time)))
+    .map(row => {
+      const converted = convertedSpecificCapacity(row);
+      const startDischarge = Number(row.start_discharge_lpm ?? row.min_discharge_lpm);
+      const stopDischarge = Number(row.stop_discharge_lpm ?? row.min_discharge_lpm);
+      const map = {
+        "Start Water Level": roundNumber(converted.startWaterLevelM, 3),
+        "Stop Water Level": roundNumber(converted.stopWaterLevelM, 3),
+        "Start Discharge": Number.isFinite(startDischarge) ? roundNumber(startDischarge * LPM_TO_M3_PER_SEC, 8) : "",
+        "Stop Discharge": Number.isFinite(stopDischarge) ? roundNumber(stopDischarge * LPM_TO_M3_PER_SEC, 8) : "",
+        "Lowest Discharge": roundNumber(converted.lowestDischargeM3s, 8),
+        "Pumping Duration": row.duration_min == null ? "" : Math.round(Number(row.duration_min)),
+        "Transmissivity": roundNumber(converted.specificCapacityM3sPerM, 8),
+        "Inverse of Transmissivity": roundNumber(inverseSpecificCapacity(converted.specificCapacityM3sPerM, converted.drawdownM, converted.lowestDischargeM3s), 2)
+      };
+      return map[field];
+    })
+    .filter(value => value !== null && value !== undefined && value !== "");
+  return values.join("\n");
+}
+
+function monthlySpecificCapacitySheets(rows) {
+  if (!rows.length) {
+    return [{
+      name: "No Data",
+      headers: ["Message"],
+      rows: [["No valid pumping sessions found."]]
+    }];
+  }
+
+  const monthGroups = new Map();
+  for (const row of rows) {
+    const day = datePart(row.start_time);
+    const monthKey = day.slice(0, 7);
+    if (!monthGroups.has(monthKey)) monthGroups.set(monthKey, []);
+    monthGroups.get(monthKey).push(row);
+  }
+
+  return Array.from(monthGroups.entries()).sort(([a], [b]) => a.localeCompare(b)).map(([monthKey, monthRows]) => {
+    const days = Array.from(new Set(monthRows.map(row => datePart(row.start_time)))).sort();
+    const firstHeader = ["Ward No", "Ward Name", "UID"];
+    const secondHeader = ["", "", ""];
+    const merges = ["A1:A2", "B1:B2", "C1:C2"];
+
+    let col = 4;
+    for (const day of days) {
+      firstHeader.push(dayLabelFromDatePart(day), ...Array(MONTHLY_SPECIFIC_CAPACITY_HEADERS.length - 1).fill(""));
+      secondHeader.push(...MONTHLY_SPECIFIC_CAPACITY_HEADERS);
+      merges.push(`${cellAddress(1, col)}:${cellAddress(1, col + MONTHLY_SPECIFIC_CAPACITY_HEADERS.length - 1)}`);
+      col += MONTHLY_SPECIFIC_CAPACITY_HEADERS.length;
+    }
+
+    const grouped = new Map();
+    for (const row of monthRows) {
+      const key = `${row.ward_no || ""}|${row.ward_name || ""}|${row.uid}`;
+      if (!grouped.has(key)) grouped.set(key, new Map());
+      const day = datePart(row.start_time);
+      if (!grouped.get(key).has(day)) grouped.get(key).set(day, []);
+      grouped.get(key).get(day).push(row);
+    }
+
+    const bodyRows = Array.from(grouped.entries()).sort(([a], [b]) => {
+      const [wardA, nameA, uidA] = a.split("|");
+      const [wardB, nameB, uidB] = b.split("|");
+      const numA = Number(wardA);
+      const numB = Number(wardB);
+      if (Number.isFinite(numA) && Number.isFinite(numB) && numA !== numB) return numA - numB;
+      return String(wardA).localeCompare(String(wardB)) || String(nameA).localeCompare(String(nameB)) || String(uidA).localeCompare(String(uidB));
+    }).map(([key, dayMap]) => {
+      const [wardNo, wardName, uid] = key.split("|");
+      const row = [wardNo, wardName, uid];
+      for (const day of days) {
+        const dayRows = dayMap.get(day) || [];
+        for (const header of MONTHLY_SPECIFIC_CAPACITY_HEADERS) {
+          row.push(sessionDayValue(dayRows, header));
+        }
+      }
+      return row;
+    });
+
+    return {
+      name: monthLabelFromDatePart(`${monthKey}-01`),
+      headerRows: [firstHeader, secondHeader],
+      merges,
+      rows: bodyRows
+    };
+  });
+}
+
 function multiSheetExcelResponse(sheets, filename) {
   const usedNames = new Set();
   const normalizedSheets = sheets.map((sheet, index) => {
@@ -957,8 +1071,10 @@ function multiSheetExcelResponse(sheets, filename) {
 
   const worksheetXml = (sheet) => {
     const headers = sheet.headers || [];
+    const headerRows = sheet.headerRows || [headers];
     const rows = sheet.rows || [];
     const preambleRows = sheet.preambleRows || [];
+    const merges = sheet.merges || [];
     const sheetRows = [];
 
     preambleRows.forEach((row, rowIndex) => {
@@ -973,10 +1089,13 @@ function multiSheetExcelResponse(sheets, filename) {
     });
 
     const headerRow = preambleRows.length + 1;
-    sheetRows.push(`<row r="${headerRow}">${headers.map((header, index) => inlineCell(headerRow, index + 1, header, 2)).join("")}</row>`);
+    headerRows.forEach((headerValues, headerIndex) => {
+      const excelRow = headerRow + headerIndex;
+      sheetRows.push(`<row r="${excelRow}">${(headerValues || []).map((header, index) => inlineCell(excelRow, index + 1, header, 2)).join("")}</row>`);
+    });
 
     rows.forEach((row, rowIndex) => {
-      const excelRow = headerRow + rowIndex + 1;
+      const excelRow = headerRow + headerRows.length + rowIndex;
       const cells = row.map((value, colIndex) => {
         if (value && typeof value === "object" && value.formula) {
           return formulaCell(excelRow, colIndex + 1, value.formula, value.value, 3);
@@ -989,15 +1108,24 @@ function multiSheetExcelResponse(sheets, filename) {
       sheetRows.push(`<row r="${excelRow}">${cells.join("")}</row>`);
     });
 
-    const maxColumn = Math.max(headers.length, 1);
-    const maxRow = Math.max(preambleRows.length + rows.length + 1, 1);
+    const maxColumn = Math.max(
+      ...headerRows.map(row => (row || []).length),
+      ...rows.map(row => (row || []).length),
+      headers.length,
+      1
+    );
+    const maxRow = Math.max(preambleRows.length + rows.length + headerRows.length, 1);
     const cols = `<col min="1" max="${maxColumn}" width="20" customWidth="1"/>`;
+    const mergeXml = merges.length
+      ? `<mergeCells count="${merges.length}">${merges.map(ref => `<mergeCell ref="${xmlEscape(ref)}"/>`).join("")}</mergeCells>`
+      : "";
     return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
   <dimension ref="A1:${cellAddress(maxRow, maxColumn)}"/>
-  <sheetViews><sheetView workbookViewId="0"><pane ySplit="${headerRow}" topLeftCell="A${headerRow + 1}" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
+  <sheetViews><sheetView workbookViewId="0"><pane ySplit="${headerRow + headerRows.length - 1}" topLeftCell="A${headerRow + headerRows.length}" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
   <cols>${cols}</cols>
   <sheetData>${sheetRows.join("")}</sheetData>
+  ${mergeXml}
 </worksheet>`;
   };
 
@@ -2281,6 +2409,8 @@ export default {
             SELECT
               s.*,
               MIN(a.discharge) AS min_discharge_lpm,
+              (ARRAY_AGG(a.discharge ORDER BY a.time ASC))[1] AS start_discharge_lpm,
+              (ARRAY_AGG(a.discharge ORDER BY a.time DESC))[1] AS stop_discharge_lpm,
               AVG(a.discharge) AS avg_discharge_lpm,
               MAX(a.discharge) AS max_discharge_lpm,
               COUNT(a.discharge) AS discharge_readings_in_session
@@ -2308,6 +2438,8 @@ export default {
             water_level_stop_ft,
             drawdown_ft,
             min_discharge_lpm,
+            start_discharge_lpm,
+            stop_discharge_lpm,
             avg_discharge_lpm,
             max_discharge_lpm,
             discharge_readings_in_session,
@@ -2395,6 +2527,8 @@ export default {
                   water_level_stop_ft: onLevel,
                   drawdown_ft: drawdown,
                   min_discharge_lpm: discharge,
+                  start_discharge_lpm: discharge,
+                  stop_discharge_lpm: discharge,
                   avg_discharge_lpm: discharge,
                   max_discharge_lpm: discharge,
                   discharge_readings_in_session: 1,
@@ -2435,6 +2569,8 @@ export default {
                     water_level_stop_ft: onLevel,
                     drawdown_ft: drawdown,
                     min_discharge_lpm: Math.min(...discharges),
+                    start_discharge_lpm: discharges[0],
+                    stop_discharge_lpm: discharges[discharges.length - 1],
                     avg_discharge_lpm: discharges.reduce((sum, value) => sum + value, 0) / discharges.length,
                     max_discharge_lpm: Math.max(...discharges),
                     discharge_readings_in_session: discharges.length,
@@ -2455,118 +2591,11 @@ export default {
           });
         }
 
-        const sessionHeaders = [
-          "Date",
-          "Pump Start",
-          "Pump Stop",
-          "Duration (min)",
-          "Start Water Level (m)",
-          "Stop Water Level (m)",
-          "Drawdown / Drop (m)",
-          "Lowest Discharge (m3/s)",
-          "Discharge Readings in Session",
-          "Specific Capacity (m2/s)",
-          "Inverse Specific Capacity (s/m2)"
-        ];
-
-        const wardGroups = new Map();
-        const uidGroups = new Map();
-        for (const row of rows) {
-          const wardKey = `${row.ward_no || ""}|${row.ward_name || ""}`;
-          if (!wardGroups.has(wardKey)) wardGroups.set(wardKey, []);
-          wardGroups.get(wardKey).push(row);
-          const uidKey = String(row.uid);
-          if (!uidGroups.has(uidKey)) uidGroups.set(uidKey, []);
-          uidGroups.get(uidKey).push(row);
-        }
-
-        const wardSummaryRows = Array.from(wardGroups.entries()).map(([wardKey, wardRows]) => {
-          const [wardNo, wardName] = wardKey.split("|");
-          const capacities = wardRows
-            .map(row => convertedSpecificCapacity(row).specificCapacityM3sPerM)
-            .filter(value => Number.isFinite(value));
-          const inverseCapacities = wardRows
-            .map(row => {
-              const converted = convertedSpecificCapacity(row);
-              return inverseSpecificCapacity(converted.specificCapacityM3sPerM, converted.drawdownM, converted.lowestDischargeM3s);
-            })
-            .filter(value => Number.isFinite(value));
-          const drawdowns = wardRows
-            .map(row => convertedSpecificCapacity(row).drawdownM)
-            .filter(value => Number.isFinite(value));
-          return [
-            wardNo,
-            wardName,
-            new Set(wardRows.map(row => row.uid)).size,
-            wardRows.length,
-            roundNumber(capacities.reduce((sum, value) => sum + value, 0) / capacities.length, 8),
-            roundNumber(Math.max(...capacities), 8),
-            roundNumber(inverseCapacities.reduce((sum, value) => sum + value, 0) / inverseCapacities.length, 2),
-            roundNumber(Math.max(...inverseCapacities), 2),
-            ...Array.from(new Set(wardRows.map(row => String(row.uid)))).sort().map(uid => ({
-              formula: `HYPERLINK("#'${safeExcelSheetName(uid)}'!A1","${uid}")`,
-              value: uid
-            }))
-          ];
-        }).sort((a, b) => {
-          const wardA = Number(a[0]);
-          const wardB = Number(b[0]);
-          if (Number.isFinite(wardA) && Number.isFinite(wardB) && wardA !== wardB) return wardA - wardB;
-          return String(a[0]).localeCompare(String(b[0]));
-        });
-        const maxUidColumns = Math.max(1, ...wardSummaryRows.map(row => Math.max(0, row.length - 8)));
-        const wardSummaryHeaders = [
-          "Ward No",
-          "Ward Name",
-          "UID Count",
-          "Valid Pumping Sessions Used",
-          "Average Specific Capacity (m2/s)",
-          "Maximum Specific Capacity (m2/s)",
-          "Average Inverse Specific Capacity (s/m2)",
-          "Maximum Inverse Specific Capacity (s/m2)",
-          ...Array.from({ length: maxUidColumns }, (_, index) => `UID ${index + 1}`)
-        ];
-
-        const sessionRow = row => {
-          const converted = convertedSpecificCapacity(row);
-          return [
-            datePart(row.start_time),
-            formatExcelDateTime(row.start_time),
-            formatExcelDateTime(row.stop_time),
-            row.duration_min == null ? "" : Math.round(Number(row.duration_min)),
-            roundNumber(converted.startWaterLevelM, 3),
-            roundNumber(converted.stopWaterLevelM, 3),
-            roundNumber(converted.drawdownM, 3),
-            roundNumber(converted.lowestDischargeM3s, 8),
-            Number(row.discharge_readings_in_session || 0),
-            roundNumber(converted.specificCapacityM3sPerM, 8),
-            roundNumber(inverseSpecificCapacity(converted.specificCapacityM3sPerM, converted.drawdownM, converted.lowestDischargeM3s), 2)
-          ];
-        };
-
-        const sheets = [
-          {
-            name: "Ward Summary",
-            headers: wardSummaryHeaders,
-            rows: wardSummaryRows
-          },
-          ...Array.from(uidGroups.entries()).sort((a, b) => {
-            const avgA = averageSpecificCapacity(a[1]);
-            const avgB = averageSpecificCapacity(b[1]);
-            return (avgB || 0) - (avgA || 0) || String(a[0]).localeCompare(String(b[0]));
-          }).map(([uid, uidRows]) => ({
-            name: uid,
-            preambleRows: specificCapacityPreamble(uid, uidRows),
-            headers: sessionHeaders,
-            rows: uidRows
-              .sort((a, b) => String(a.start_time).localeCompare(String(b.start_time)))
-              .map(sessionRow)
-          }))
-        ];
+        const sheets = monthlySpecificCapacitySheets(rows);
 
         const filename = requestedWardNo
           ? `specific_capacity_ward_${normalizedRequestedWardNo || requestedWardNo}.xlsx`
-          : "specific_capacity_by_uid_and_ward.xlsx";
+          : "specific_capacity_monthly_by_ward_uid.xlsx";
         return multiSheetExcelResponse(sheets, filename);
       }
 
