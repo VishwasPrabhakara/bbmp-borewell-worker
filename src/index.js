@@ -6,6 +6,74 @@ const FT_TO_M = 0.3048;
 const LPM_TO_M3_PER_SEC = 1 / 60000;
 const TRANSMISSIVITY_SCALE = 1000000;
 const MIN_MONTHLY_DRAWDOWN_M = 0.3;
+const CRITICAL_GW_MIN_WEEKS = 4;
+const CRITICAL_GW_MIN_COMPARISONS = 3;
+const CRITICAL_GW_MAX_WEEK_GAP = 2;
+const CRITICAL_GW_RELATIVE_JUMP_RATIO = 10;
+const CRITICAL_GW_MIN_LARGE_JUMP_FT = 50;
+const CRITICAL_GW_DECLINE_FT_PER_WEEK = 0.1;
+const PREVIOUS_CRITICAL_WARDS = [
+  ["48", "Muneshwaranagar"],
+  ["33", "Manorayanapalya"],
+  ["13", "Mallasandra"],
+  ["122", "Kempapura Agrahara"],
+  ["102", "Vrishabhavathi"],
+  ["161", "Hosakerehalli"],
+  ["22", "Vishwanatha Nagenahalli"],
+  ["195", "Konanakunte"],
+  ["127", "Moodalapalya"],
+  ["116", "Neelasandra"],
+  ["15", "T. Dasarahalli"],
+  ["183", "Chikkalasandra"],
+  ["74", "Shakthiganapathinagar"],
+  ["37", "Yeshwanthpura"],
+  ["68", "Mahalakshmipuram"],
+  ["31", "Kushalnagar"],
+  ["19", "Sanjaynagar"],
+  ["187", "Puttenahalli"],
+  ["43", "Nandini Layout"],
+  ["28", "Kammanahalli"],
+  ["123", "Vijaynagar"],
+  ["134", "Bapujinagar"],
+  ["14", "Bagalagunte"],
+  ["130", "Ullalu"],
+  ["69", "Laggere"],
+  ["32", "Kavalbyrasandra"],
+  ["57", "C. V. Raman Nagar"],
+  ["186", "Jaraganahalli"],
+  ["189", "Hongasandra"],
+  ["190", "Mangammanapalya"],
+  ["163", "Kathriguppe"],
+  ["39", "Chokkasandra"],
+  ["185", "Yelachenahalli"],
+  ["124", "Hosahalli"],
+  ["10", "Doddabommasandra"],
+  ["156", "Srinagar"],
+  ["103", "Kaveripura"],
+  ["71", "Hegganahalli"],
+  ["148", "Ejipura"],
+  ["128", "Nagarabhavi"],
+  ["81", "Vignananagar"],
+  ["21", "Hebbala"],
+  ["6", "Thanisandra"],
+  ["75", "Shankara Matha"],
+  ["49", "Lingarajapuram"],
+  ["171", "Gurappanapalya"],
+  ["30", "Kadugondanahalli"],
+  ["70", "Rajagopalanagar"],
+  ["126", "Maruthi Mandira"],
+  ["36", "Mathikere"],
+  ["8", "Kodigehalli"],
+  ["133", "Hampinagar"],
+  ["131", "Nayandahalli"],
+  ["97", "Dayanandanagar"],
+  ["121", "Binnipete"],
+  ["101", "Kamakshipalya"],
+  ["164", "Vidyapeetha"],
+  ["18", "Radhakrishna Temple"],
+  ["144", "Siddapura"],
+  ["40", "Dodda Bidarkallu"]
+];
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -557,6 +625,302 @@ function weeklyWardPayload(rows, qcRows, includeSensorDetails = false) {
     weeks: allWeekLabels,
     wards: Array.from(wardMap.values()).sort((a, b) => Number(a.wardNo) - Number(b.wardNo))
   };
+}
+
+function criticalWardMap() {
+  return new Map(PREVIOUS_CRITICAL_WARDS.map(([wardNo, wardName]) => [normalizeWardNoValue(wardNo), wardName]));
+}
+
+function weekIndexMap(weeks) {
+  return new Map((weeks || []).map((label, index) => [label, index]));
+}
+
+function validCriticalComparisons(weekly, weeks) {
+  const positions = weekIndexMap(weeks);
+  const points = (weekly || [])
+    .filter(point => Number.isFinite(Number(point.averageLevel)))
+    .map(point => ({
+      label: point.label,
+      level: Number(point.averageLevel),
+      index: positions.has(point.label) ? positions.get(point.label) : null,
+      sensorCount: Number(point.sensorCount || 0)
+    }))
+    .filter(point => point.index !== null)
+    .sort((a, b) => a.index - b.index);
+
+  const comparisons = [];
+  const skipped = [];
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const current = points[index];
+    const next = points[index + 1];
+    const gap = next.index - current.index;
+    if (gap <= 0 || gap > CRITICAL_GW_MAX_WEEK_GAP) {
+      skipped.push(`${current.label} to ${next.label}: skipped because weekly gap is ${gap} week positions`);
+      continue;
+    }
+    const delta = next.level - current.level;
+    const smaller = Math.max(Math.min(Math.abs(current.level), Math.abs(next.level)), 1);
+    const ratio = Math.max(Math.abs(current.level), Math.abs(next.level)) / smaller;
+    if (Math.abs(delta) >= CRITICAL_GW_MIN_LARGE_JUMP_FT && ratio >= CRITICAL_GW_RELATIVE_JUMP_RATIO) {
+      skipped.push(`${current.label} to ${next.label}: skipped as likely sensor/data jump (${roundNumber(current.level, 2)} ft to ${roundNumber(next.level, 2)} ft)`);
+      continue;
+    }
+    comparisons.push({
+      fromLabel: current.label,
+      toLabel: next.label,
+      gap,
+      startLevel: current.level,
+      endLevel: next.level,
+      changeFt: delta,
+      changeFtPerWeek: delta / gap,
+      changeFtPerDay: delta / (gap * 7),
+      sensorCount: Math.min(current.sensorCount, next.sensorCount)
+    });
+  }
+  return { points, comparisons, skipped };
+}
+
+function criticalDirection(changeFtPerWeek) {
+  if (!Number.isFinite(changeFtPerWeek)) return "Not computed";
+  if (changeFtPerWeek > CRITICAL_GW_DECLINE_FT_PER_WEEK) return "Declining";
+  if (changeFtPerWeek < -CRITICAL_GW_DECLINE_FT_PER_WEEK) return "Improving";
+  return "Mostly stable";
+}
+
+function criticalGroundwaterRows(payload) {
+  const critical = criticalWardMap();
+  const rowsByWard = new Map();
+  const pairRows = [];
+
+  for (const ward of payload.wards || []) {
+    const wardNo = normalizeWardNoValue(ward.wardNo);
+    const previousCritical = critical.has(wardNo);
+    const { points, comparisons, skipped } = validCriticalComparisons(ward.weekly, payload.weeks);
+    const hasEnough = points.length >= CRITICAL_GW_MIN_WEEKS && comparisons.length >= CRITICAL_GW_MIN_COMPARISONS;
+    const averageChange = hasEnough
+      ? comparisons.reduce((sum, item) => sum + item.changeFtPerWeek, 0) / comparisons.length
+      : null;
+    const direction = criticalDirection(averageChange);
+    const groundwaterCritical = hasEnough && direction === "Declining";
+    const reason = !ward.goodSensors
+      ? "No GOOD sensors with cleaned weekly groundwater levels are available."
+      : points.length < CRITICAL_GW_MIN_WEEKS
+        ? `Not computed because only ${points.length} cleaned weekly ward values are available; minimum required is ${CRITICAL_GW_MIN_WEEKS}.`
+        : comparisons.length < CRITICAL_GW_MIN_COMPARISONS
+          ? `Not computed because only ${comparisons.length} valid week-to-week comparisons remain after gap/jump cleaning; minimum required is ${CRITICAL_GW_MIN_COMPARISONS}.`
+          : groundwaterCritical
+            ? "Computed as critical because cleaned weekly groundwater level is declining."
+            : "Computed as normal because cleaned weekly groundwater level is stable or improving.";
+
+    const row = {
+      wardNo,
+      wardName: ward.wardName || critical.get(wardNo) || "",
+      previousCriticalWard: previousCritical ? "Yes" : "No",
+      previousCriticalWardName: critical.get(wardNo) || "",
+      groundwaterStatus: groundwaterCritical ? "Critical" : "Normal",
+      groundwaterDirection: direction,
+      computed: hasEnough ? "Yes" : "No",
+      totalSensors: ward.totalSensors || 0,
+      goodSensors: ward.goodSensors || 0,
+      usableWeeklyValues: points.length,
+      validWeeklyComparisons: comparisons.length,
+      skippedComparisons: skipped.length,
+      averageChangeFtPerWeek: roundNumber(averageChange, 4),
+      averageChangeFtPerDay: roundNumber(Number.isFinite(averageChange) ? averageChange / 7 : null, 4),
+      uidList: (ward.sensors || []).map(sensor => sensor.uid).join(", "),
+      noWeeklyDataUids: (ward.noWeeklyDataUids || []).join(", "),
+      updateReason: reason,
+      skippedReasonDetails: skipped.join(" | ")
+    };
+    for (const point of ward.weekly || []) {
+      row[`${point.label} average_level_ft`] = point.averageLevel;
+      row[`${point.label} sensor_count`] = point.sensorCount;
+    }
+    rowsByWard.set(wardNo, row);
+
+    for (const item of comparisons) {
+      pairRows.push([
+        wardNo,
+        row.wardName,
+        previousCritical ? "Yes" : "No",
+        item.fromLabel,
+        item.toLabel,
+        roundNumber(item.startLevel, 2),
+        roundNumber(item.endLevel, 2),
+        roundNumber(item.changeFt, 2),
+        roundNumber(item.changeFtPerWeek, 4),
+        roundNumber(item.changeFtPerDay, 4),
+        item.gap,
+        item.sensorCount
+      ]);
+    }
+  }
+
+  for (const [wardNo, wardName] of critical.entries()) {
+    if (!rowsByWard.has(wardNo)) {
+      rowsByWard.set(wardNo, {
+        wardNo,
+        wardName,
+        previousCriticalWard: "Yes",
+        previousCriticalWardName: wardName,
+        groundwaterStatus: "Normal",
+        groundwaterDirection: "No sensors available",
+        computed: "No",
+        totalSensors: 0,
+        goodSensors: 0,
+        usableWeeklyValues: 0,
+        validWeeklyComparisons: 0,
+        skippedComparisons: 0,
+        averageChangeFtPerWeek: null,
+        averageChangeFtPerDay: null,
+        uidList: "",
+        noWeeklyDataUids: "",
+        updateReason: "No sensors available in the dashboard weekly groundwater dataset.",
+        skippedReasonDetails: ""
+      });
+    }
+  }
+
+  const rows = Array.from(rowsByWard.values()).sort((a, b) => {
+    const statusSort = (b.groundwaterStatus === "Critical") - (a.groundwaterStatus === "Critical");
+    if (statusSort) return statusSort;
+    const aRate = Number.isFinite(Number(a.averageChangeFtPerWeek)) ? Number(a.averageChangeFtPerWeek) : -999999;
+    const bRate = Number.isFinite(Number(b.averageChangeFtPerWeek)) ? Number(b.averageChangeFtPerWeek) : -999999;
+    if (bRate !== aRate) return bRate - aRate;
+    return Number(a.wardNo) - Number(b.wardNo);
+  });
+  rows.forEach((row, index) => {
+    row.groundwaterDeclineRank = row.computed === "Yes" ? index + 1 : "";
+  });
+  return { rows, pairRows };
+}
+
+async function khWeeklyPayload(sql) {
+  const qcRows = await sql`
+    SELECT uid, ward_no, ward_name, qc_status
+    FROM sensor_qc_summary
+    WHERE ward_no IS NOT NULL
+      AND ward_no <> ''
+  `;
+  const rows = await sql`
+    WITH good_sensors AS (
+      SELECT uid, ward_no, ward_name
+      FROM sensor_qc_summary
+      WHERE qc_status = 'GOOD'
+        AND ward_no IS NOT NULL
+        AND ward_no <> ''
+    ),
+    uploaded_uids AS (
+      SELECT DISTINCT uid FROM uploaded_type_b_sessions
+    ),
+    type_b_points AS (
+      SELECT
+        q.ward_no,
+        q.ward_name,
+        q.uid,
+        b.stop_time AS reading_time,
+        b.water_level_stop_ft AS water_level_ft,
+        b.water_level_stop_ft AS on_level,
+        b.water_level_start_ft AS off_level,
+        COALESCE(b.session_duration_min, EXTRACT(EPOCH FROM (b.stop_time - b.start_time)) / 60) / 60 AS runtime_hours
+      FROM uploaded_type_b_sessions b
+      JOIN good_sensors q ON q.uid = b.uid
+      WHERE b.water_level_stop_ft IS NOT NULL
+    ),
+    kh_points AS (
+      SELECT
+        q.ward_no,
+        q.ward_name,
+        q.uid,
+        w.time AS reading_time,
+        COALESCE(w.water_level, w.on_level, w.off_level) AS water_level_ft,
+        w.on_level,
+        w.off_level,
+        NULL::double precision AS runtime_hours
+      FROM water_levels w
+      JOIN good_sensors q ON q.uid = w.uid
+      WHERE q.uid NOT IN (SELECT uid FROM uploaded_uids)
+        AND COALESCE(w.water_level, w.on_level, w.off_level) IS NOT NULL
+    )
+    SELECT ward_no, ward_name, uid, reading_time, water_level_ft, on_level, off_level, runtime_hours
+    FROM (
+      SELECT * FROM type_b_points
+      UNION ALL
+      SELECT * FROM kh_points
+    ) points
+    ORDER BY ward_no, uid, reading_time
+  `;
+  return weeklyWardPayload(rows, qcRows, true);
+}
+
+function criticalGroundwaterExcelResponse(payload, filename = "critical_wards_groundwater_update.xlsx") {
+  const { rows, pairRows } = criticalGroundwaterRows(payload);
+  const weekHeaders = [];
+  for (const label of payload.weeks || []) {
+    weekHeaders.push(`${label} average_level_ft`, `${label} sensor_count`);
+  }
+  const headers = [
+    "groundwaterDeclineRank",
+    "wardNo",
+    "wardName",
+    "previousCriticalWard",
+    "previousCriticalWardName",
+    "groundwaterStatus",
+    "groundwaterDirection",
+    "computed",
+    "totalSensors",
+    "goodSensors",
+    "usableWeeklyValues",
+    "validWeeklyComparisons",
+    "skippedComparisons",
+    "averageChangeFtPerWeek",
+    "averageChangeFtPerDay",
+    "uidList",
+    "noWeeklyDataUids",
+    "updateReason",
+    "skippedReasonDetails",
+    ...weekHeaders
+  ];
+  const sheets = [
+    {
+      name: "Ward Groundwater Update",
+      headers,
+      rows: rows.map(row => headers.map(header => row[header]))
+    },
+    {
+      name: "Valid Weekly Comparisons",
+      headers: [
+        "wardNo",
+        "wardName",
+        "previousCriticalWard",
+        "fromWeek",
+        "toWeek",
+        "startAverageLevelFt",
+        "endAverageLevelFt",
+        "changeFt",
+        "changeFtPerWeek",
+        "changeFtPerDay",
+        "weekGap",
+        "sensorCountUsed"
+      ],
+      rows: pairRows
+    },
+    {
+      name: "Method",
+      headers: ["Item", "Explanation"],
+      rows: [
+        ["Update frequency", "This endpoint is generated from current dashboard data and should be reviewed every 15 days after fresh sensor data is downloaded."],
+        ["Source", "Uses the same KrishiHrudaya ward weekly groundwater payload used by the dashboard."],
+        ["Cleaning before calculation", "Sensor points are cleaned using the dashboard water-level cleaning method, then weekly points are selected at least 7 days apart."],
+        ["Minimum weekly data", `Ward trend is computed only when at least ${CRITICAL_GW_MIN_WEEKS} cleaned weekly ward values and ${CRITICAL_GW_MIN_COMPARISONS} valid week-to-week comparisons remain.`],
+        ["Gap rule", `A comparison is skipped when the gap between available weekly positions is more than ${CRITICAL_GW_MAX_WEEK_GAP}.`],
+        ["Large jump rule", `A comparison is skipped as likely sensor/data error when the jump is at least ${CRITICAL_GW_MIN_LARGE_JUMP_FT} ft and one value is at least ${CRITICAL_GW_RELATIVE_JUMP_RATIO} times the other.`],
+        ["Direction", "Positive change means feet below ground surface increased, so groundwater became deeper. Negative change means groundwater became shallower."],
+        ["Red dashboard color", "Only wards with enough cleaned data and declining groundwater trend are marked Critical/red. Wards without enough weekly data stay normal and explain why in updateReason."]
+      ]
+    }
+  ];
+  return multiSheetExcelResponse(sheets, filename);
 }
 
 const CRC32_TABLE = new Uint32Array(256).map((_, index) => {
@@ -1499,6 +1863,19 @@ async function triggerGithubAction(env) {
   }
 }
 
+async function queueRefresh(sql, env, message = "Refresh queued") {
+  await sql`
+    INSERT INTO refresh_status (id, running, ok, last_started, message)
+    VALUES (1, true, true, NOW(), ${message})
+    ON CONFLICT (id) DO UPDATE SET
+      running = true,
+      ok = true,
+      last_started = NOW(),
+      message = ${message}
+  `;
+  await triggerGithubAction(env);
+}
+
 async function ensureUploadedTables(sql) {
   await sql`
     CREATE TABLE IF NOT EXISTS uploaded_type_a_readings (
@@ -2138,17 +2515,7 @@ export default {
           return json({ started: false, reason: "fresh", status: statusPayload(status) });
         }
 
-        await sql`
-          INSERT INTO refresh_status (id, running, ok, last_started, message)
-          VALUES (1, true, true, NOW(), 'Refresh queued')
-          ON CONFLICT (id) DO UPDATE SET
-            running = true,
-            ok = true,
-            last_started = NOW(),
-            message = 'Refresh queued'
-        `;
-
-        await triggerGithubAction(env);
+        await queueRefresh(sql, env, "Refresh queued");
 
         return json({ started: true });
       }
@@ -3319,6 +3686,27 @@ export default {
         return weeklyLevelsExcelResponse(rows, "good_sensor_weekly_start_levels.xlsx");
       }
 
+      if (url.pathname === "/api/critical-wards-groundwater" || url.pathname === "/api/critical-wards-groundwater.xlsx") {
+        const payload = await khWeeklyPayload(sql);
+        const generatedAt = new Date();
+        const updateWindowDays = 15;
+        const nextRecommendedUpdate = new Date(generatedAt.getTime() + updateWindowDays * 86400000);
+        if (url.pathname.endsWith(".xlsx")) {
+          return criticalGroundwaterExcelResponse(payload);
+        }
+        const { rows } = criticalGroundwaterRows(payload);
+        return json({
+          generatedAt: generatedAt.toISOString(),
+          nextRecommendedUpdate: nextRecommendedUpdate.toISOString(),
+          updateWindowDays,
+          minimumWeeklyValues: CRITICAL_GW_MIN_WEEKS,
+          minimumWeeklyComparisons: CRITICAL_GW_MIN_COMPARISONS,
+          criticalCount: rows.filter(row => row.groundwaterStatus === "Critical").length,
+          previousCriticalCount: PREVIOUS_CRITICAL_WARDS.length,
+          wards: rows
+        });
+      }
+
       if (url.pathname === "/api/ward-weekly-levels") {
         const source = url.searchParams.get("source") || "kh";
         const wardNo = url.searchParams.get("ward_no");
@@ -3494,7 +3882,10 @@ export default {
         return json(wardNo ? {
           ward: payload.wards.find(ward => normalizeWardNoValue(ward.wardNo) === normalizedWardNo) || null,
           weeks: payload.weeks
-        } : payload);
+        } : {
+          ...payload,
+          criticalGroundwater: criticalGroundwaterRows(payload).rows
+        });
       }
 
       if (url.pathname === "/api/indicators/wards") {
@@ -3672,5 +4063,12 @@ export default {
 
       return json({ error: String(error.message || error) }, 500);
     }
+  },
+  async scheduled(controller, env, ctx) {
+    const sql = neon(env.DATABASE_URL);
+    ctx.waitUntil(
+      queueRefresh(sql, env, `Scheduled 15-day refresh queued by cron ${controller.cron}`)
+        .catch(error => console.error("Scheduled refresh failed", error))
+    );
   }
 };
