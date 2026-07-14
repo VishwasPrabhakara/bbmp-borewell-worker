@@ -687,6 +687,114 @@ function criticalDirection(changeFtPerWeek) {
   return "Mostly stable";
 }
 
+function normalCdf(value) {
+  const sign = value < 0 ? -1 : 1;
+  const x = Math.abs(value) / Math.sqrt(2);
+  const t = 1 / (1 + 0.3275911 * x);
+  const erf = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x);
+  return 0.5 * (1 + sign * erf);
+}
+
+function trendMethods(points, comparisons = []) {
+  const usablePoints = (points || [])
+    .filter(point => Number.isFinite(Number(point.level)) && Number.isFinite(Number(point.index)))
+    .sort((a, b) => a.index - b.index);
+  const n = usablePoints.length;
+  if (n < 2) {
+    return {
+      linearSlopeFtPerWeek: null,
+      linearSlopeFtPerDay: null,
+      linearR2: null,
+      senSlopeFtPerWeek: null,
+      senSlopeFtPerDay: null,
+      mannKendallS: null,
+      mannKendallZ: null,
+      mannKendallPValue: null,
+      mannKendallTrend: "Not computed"
+    };
+  }
+
+  const meanX = usablePoints.reduce((sum, point) => sum + point.index, 0) / n;
+  const meanY = usablePoints.reduce((sum, point) => sum + point.level, 0) / n;
+  const denominator = usablePoints.reduce((sum, point) => sum + ((point.index - meanX) ** 2), 0);
+  const linearSlope = denominator
+    ? usablePoints.reduce((sum, point) => sum + ((point.index - meanX) * (point.level - meanY)), 0) / denominator
+    : null;
+  const intercept = Number.isFinite(linearSlope) ? meanY - linearSlope * meanX : null;
+  const totalSquares = usablePoints.reduce((sum, point) => sum + ((point.level - meanY) ** 2), 0);
+  const residualSquares = Number.isFinite(intercept)
+    ? usablePoints.reduce((sum, point) => {
+      const expected = intercept + linearSlope * point.index;
+      return sum + ((point.level - expected) ** 2);
+    }, 0)
+    : null;
+
+  const pairSlopes = [];
+  for (let i = 0; i < usablePoints.length - 1; i += 1) {
+    for (let j = i + 1; j < usablePoints.length; j += 1) {
+      const dx = usablePoints[j].index - usablePoints[i].index;
+      if (dx > 0) pairSlopes.push((usablePoints[j].level - usablePoints[i].level) / dx);
+    }
+  }
+  const validComparisonSlopes = (comparisons || [])
+    .map(item => Number(item.changeFtPerWeek))
+    .filter(value => Number.isFinite(value));
+  const senSlope = median(validComparisonSlopes.length ? validComparisonSlopes : pairSlopes);
+
+  let s = 0;
+  for (let i = 0; i < usablePoints.length - 1; i += 1) {
+    for (let j = i + 1; j < usablePoints.length; j += 1) {
+      const diff = usablePoints[j].level - usablePoints[i].level;
+      s += diff > 0 ? 1 : diff < 0 ? -1 : 0;
+    }
+  }
+  const tieCounts = new Map();
+  for (const point of usablePoints) {
+    const key = String(roundNumber(point.level, 6));
+    tieCounts.set(key, (tieCounts.get(key) || 0) + 1);
+  }
+  const tieAdjustment = Array.from(tieCounts.values())
+    .filter(count => count > 1)
+    .reduce((sum, count) => sum + count * (count - 1) * (2 * count + 5), 0);
+  const variance = (n * (n - 1) * (2 * n + 5) - tieAdjustment) / 18;
+  const z = variance > 0
+    ? s > 0 ? (s - 1) / Math.sqrt(variance) : s < 0 ? (s + 1) / Math.sqrt(variance) : 0
+    : null;
+  const pValue = Number.isFinite(z) ? 2 * (1 - normalCdf(Math.abs(z))) : null;
+
+  return {
+    linearSlopeFtPerWeek: roundNumber(linearSlope, 4),
+    linearSlopeFtPerDay: roundNumber(Number.isFinite(linearSlope) ? linearSlope / 7 : null, 4),
+    linearR2: roundNumber(totalSquares > 0 && Number.isFinite(residualSquares) ? 1 - residualSquares / totalSquares : null, 4),
+    senSlopeFtPerWeek: roundNumber(senSlope, 4),
+    senSlopeFtPerDay: roundNumber(Number.isFinite(senSlope) ? senSlope / 7 : null, 4),
+    mannKendallS: s,
+    mannKendallZ: roundNumber(z, 4),
+    mannKendallPValue: roundNumber(pValue, 4),
+    mannKendallTrend: s > 0 ? "Increasing depth / declining groundwater" : s < 0 ? "Decreasing depth / improving groundwater" : "No monotonic trend"
+  };
+}
+
+function combinedGroundwaterStatus(methods, hasEnough) {
+  if (!hasEnough) return { status: "Normal", direction: "Not computed" };
+  const linear = Number(methods.linearSlopeFtPerWeek);
+  const sen = Number(methods.senSlopeFtPerWeek);
+  const mkS = Number(methods.mannKendallS);
+  const decliningVotes = [
+    Number.isFinite(linear) && linear > CRITICAL_GW_DECLINE_FT_PER_WEEK,
+    Number.isFinite(sen) && sen > CRITICAL_GW_DECLINE_FT_PER_WEEK,
+    Number.isFinite(mkS) && mkS > 0
+  ].filter(Boolean).length;
+  const improvingVotes = [
+    Number.isFinite(linear) && linear < -CRITICAL_GW_DECLINE_FT_PER_WEEK,
+    Number.isFinite(sen) && sen < -CRITICAL_GW_DECLINE_FT_PER_WEEK,
+    Number.isFinite(mkS) && mkS < 0
+  ].filter(Boolean).length;
+  if (decliningVotes >= 2) return { status: "Critical", direction: "Declining" };
+  if (improvingVotes >= 2) return { status: "Normal", direction: "Improving" };
+  return { status: "Normal", direction: "Mostly stable" };
+}
+
 function criticalGroundwaterRows(payload) {
   const critical = criticalWardMap();
   const rowsByWard = new Map();
@@ -700,8 +808,10 @@ function criticalGroundwaterRows(payload) {
     const averageChange = hasEnough
       ? comparisons.reduce((sum, item) => sum + item.changeFtPerWeek, 0) / comparisons.length
       : null;
-    const direction = criticalDirection(averageChange);
-    const groundwaterCritical = hasEnough && direction === "Declining";
+    const methods = trendMethods(points, comparisons);
+    const combined = combinedGroundwaterStatus(methods, hasEnough);
+    const direction = combined.direction;
+    const groundwaterCritical = combined.status === "Critical";
     const reason = !ward.goodSensors
       ? "No GOOD sensors with cleaned weekly groundwater levels are available."
       : points.length < CRITICAL_GW_MIN_WEEKS
@@ -709,8 +819,8 @@ function criticalGroundwaterRows(payload) {
         : comparisons.length < CRITICAL_GW_MIN_COMPARISONS
           ? `Not computed because only ${comparisons.length} valid week-to-week comparisons remain after gap/jump cleaning; minimum required is ${CRITICAL_GW_MIN_COMPARISONS}.`
           : groundwaterCritical
-            ? "Computed as critical because cleaned weekly groundwater level is declining."
-            : "Computed as normal because cleaned weekly groundwater level is stable or improving.";
+            ? "Computed as critical because at least two trend methods indicate declining groundwater."
+            : "Computed as normal because the trend methods do not jointly indicate decline.";
 
     const row = {
       wardNo,
@@ -727,6 +837,15 @@ function criticalGroundwaterRows(payload) {
       skippedComparisons: skipped.length,
       averageChangeFtPerWeek: roundNumber(averageChange, 4),
       averageChangeFtPerDay: roundNumber(Number.isFinite(averageChange) ? averageChange / 7 : null, 4),
+      linearSlopeFtPerWeek: methods.linearSlopeFtPerWeek,
+      linearSlopeFtPerDay: methods.linearSlopeFtPerDay,
+      linearR2: methods.linearR2,
+      senSlopeFtPerWeek: methods.senSlopeFtPerWeek,
+      senSlopeFtPerDay: methods.senSlopeFtPerDay,
+      mannKendallS: methods.mannKendallS,
+      mannKendallZ: methods.mannKendallZ,
+      mannKendallPValue: methods.mannKendallPValue,
+      mannKendallTrend: methods.mannKendallTrend,
       uidList: (ward.sensors || []).map(sensor => sensor.uid).join(", "),
       noWeeklyDataUids: (ward.noWeeklyDataUids || []).join(", "),
       updateReason: reason,
@@ -773,6 +892,15 @@ function criticalGroundwaterRows(payload) {
         skippedComparisons: 0,
         averageChangeFtPerWeek: null,
         averageChangeFtPerDay: null,
+        linearSlopeFtPerWeek: null,
+        linearSlopeFtPerDay: null,
+        linearR2: null,
+        senSlopeFtPerWeek: null,
+        senSlopeFtPerDay: null,
+        mannKendallS: null,
+        mannKendallZ: null,
+        mannKendallPValue: null,
+        mannKendallTrend: "Not computed",
         uidList: "",
         noWeeklyDataUids: "",
         updateReason: "No sensors available in the dashboard weekly groundwater dataset.",
@@ -875,6 +1003,15 @@ function criticalGroundwaterExcelResponse(payload, filename = "critical_wards_gr
     "skippedComparisons",
     "averageChangeFtPerWeek",
     "averageChangeFtPerDay",
+    "linearSlopeFtPerWeek",
+    "linearSlopeFtPerDay",
+    "linearR2",
+    "senSlopeFtPerWeek",
+    "senSlopeFtPerDay",
+    "mannKendallS",
+    "mannKendallZ",
+    "mannKendallPValue",
+    "mannKendallTrend",
     "uidList",
     "noWeeklyDataUids",
     "updateReason",
@@ -916,7 +1053,10 @@ function criticalGroundwaterExcelResponse(payload, filename = "critical_wards_gr
         ["Gap rule", `A comparison is skipped when the gap between available weekly positions is more than ${CRITICAL_GW_MAX_WEEK_GAP}.`],
         ["Large jump rule", `A comparison is skipped as likely sensor/data error when the jump is at least ${CRITICAL_GW_MIN_LARGE_JUMP_FT} ft and one value is at least ${CRITICAL_GW_RELATIVE_JUMP_RATIO} times the other.`],
         ["Direction", "Positive change means feet below ground surface increased, so groundwater became deeper. Negative change means groundwater became shallower."],
-        ["Red dashboard color", "Only wards with enough cleaned data and declining groundwater trend are marked Critical/red. Wards without enough weekly data stay normal and explain why in updateReason."]
+        ["Linear regression", "Fits one straight line through the weekly average groundwater points. Slope is reported in ft/week and ft/day."],
+        ["Sen slope", "Calculates pairwise weekly slopes and reports the median slope. This is more robust to irregular/noisy data than a simple average."],
+        ["Mann-Kendall", "Counts whether later weekly values are generally higher or lower than earlier values. S > 0 means increasing depth, which indicates declining groundwater."],
+        ["Red dashboard color", "Only wards with enough cleaned data and at least two trend methods indicating decline are marked Critical/red. Wards without enough weekly data stay normal and explain why in updateReason."]
       ]
     }
   ];
