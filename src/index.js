@@ -12,6 +12,7 @@ const CRITICAL_GW_MAX_WEEK_GAP = 2;
 const CRITICAL_GW_RELATIVE_JUMP_RATIO = 10;
 const CRITICAL_GW_MIN_LARGE_JUMP_FT = 50;
 const CRITICAL_GW_DECLINE_FT_PER_WEEK = 0.1;
+const CRITICAL_GW_MAX_CURRENT_WARDS = 60;
 const PREVIOUS_CRITICAL_WARDS = [
   ["48", "Muneshwaranagar"],
   ["33", "Manorayanapalya"],
@@ -776,7 +777,7 @@ function trendMethods(points, comparisons = []) {
 }
 
 function combinedGroundwaterStatus(methods, hasEnough) {
-  if (!hasEnough) return { status: "Normal", direction: "Not computed" };
+  if (!hasEnough) return { status: "Normal", direction: "Not computed", votes: 0 };
   const linear = Number(methods.linearSlopeFtPerWeek);
   const sen = Number(methods.senSlopeFtPerWeek);
   const mkS = Number(methods.mannKendallS);
@@ -790,9 +791,9 @@ function combinedGroundwaterStatus(methods, hasEnough) {
     Number.isFinite(sen) && sen < -CRITICAL_GW_DECLINE_FT_PER_WEEK,
     Number.isFinite(mkS) && mkS < 0
   ].filter(Boolean).length;
-  if (decliningVotes >= 2) return { status: "Critical", direction: "Declining" };
-  if (improvingVotes >= 2) return { status: "Normal", direction: "Improving" };
-  return { status: "Normal", direction: "Mostly stable" };
+  if (decliningVotes >= 2) return { status: "Critical", direction: "Declining", votes: decliningVotes };
+  if (improvingVotes >= 2) return { status: "Normal", direction: "Improving", votes: -improvingVotes };
+  return { status: "Normal", direction: "Mostly stable", votes: decliningVotes };
 }
 
 function criticalGroundwaterRows(payload) {
@@ -837,6 +838,9 @@ function criticalGroundwaterRows(payload) {
       skippedComparisons: skipped.length,
       averageChangeFtPerWeek: roundNumber(averageChange, 4),
       averageChangeFtPerDay: roundNumber(Number.isFinite(averageChange) ? averageChange / 7 : null, 4),
+      declineMethodVotes: combined.votes,
+      declineStrengthFtPerWeek: methods.linearSlopeFtPerWeek,
+      topDeclineRank: null,
       linearSlopeFtPerWeek: methods.linearSlopeFtPerWeek,
       linearSlopeFtPerDay: methods.linearSlopeFtPerDay,
       linearR2: methods.linearR2,
@@ -892,6 +896,9 @@ function criticalGroundwaterRows(payload) {
         skippedComparisons: 0,
         averageChangeFtPerWeek: null,
         averageChangeFtPerDay: null,
+        declineMethodVotes: 0,
+        declineStrengthFtPerWeek: null,
+        topDeclineRank: null,
         linearSlopeFtPerWeek: null,
         linearSlopeFtPerDay: null,
         linearR2: null,
@@ -909,7 +916,28 @@ function criticalGroundwaterRows(payload) {
     }
   }
 
-  const rows = Array.from(rowsByWard.values()).sort((a, b) => {
+  const allRows = Array.from(rowsByWard.values());
+  const declineCandidates = allRows
+    .filter(row => row.groundwaterStatus === "Critical")
+    .sort((a, b) => {
+      const aStrength = Number.isFinite(Number(a.declineStrengthFtPerWeek)) ? Number(a.declineStrengthFtPerWeek) : -999999;
+      const bStrength = Number.isFinite(Number(b.declineStrengthFtPerWeek)) ? Number(b.declineStrengthFtPerWeek) : -999999;
+      if (bStrength !== aStrength) return bStrength - aStrength;
+      return Number(a.wardNo) - Number(b.wardNo);
+    });
+  const topCriticalWardNos = new Set(declineCandidates.slice(0, CRITICAL_GW_MAX_CURRENT_WARDS).map(row => row.wardNo));
+  declineCandidates.forEach((row, index) => {
+    row.topDeclineRank = index + 1;
+    if (!topCriticalWardNos.has(row.wardNo)) {
+      row.groundwaterStatus = "Normal";
+      row.groundwaterDirection = "Declining but below top-60 threshold";
+      row.updateReason = `Not colored critical because it is ranked ${index + 1} by decline strength; dashboard red wards are limited to the top ${CRITICAL_GW_MAX_CURRENT_WARDS} strongest groundwater-decline candidates.`;
+    } else {
+      row.updateReason = `Computed as critical because at least two trend methods indicate decline and this ward is within the top ${CRITICAL_GW_MAX_CURRENT_WARDS} strongest groundwater-decline candidates.`;
+    }
+  });
+
+  const rows = allRows.sort((a, b) => {
     const statusSort = (b.groundwaterStatus === "Critical") - (a.groundwaterStatus === "Critical");
     if (statusSort) return statusSort;
     const aRate = Number.isFinite(Number(a.averageChangeFtPerWeek)) ? Number(a.averageChangeFtPerWeek) : -999999;
@@ -1003,6 +1031,9 @@ function criticalGroundwaterExcelResponse(payload, filename = "critical_wards_gr
     "skippedComparisons",
     "averageChangeFtPerWeek",
     "averageChangeFtPerDay",
+    "declineMethodVotes",
+    "declineStrengthFtPerWeek",
+    "topDeclineRank",
     "linearSlopeFtPerWeek",
     "linearSlopeFtPerDay",
     "linearR2",
@@ -1056,7 +1087,7 @@ function criticalGroundwaterExcelResponse(payload, filename = "critical_wards_gr
         ["Linear regression", "Fits one straight line through the weekly average groundwater points. Slope is reported in ft/week and ft/day."],
         ["Sen slope", "Calculates pairwise weekly slopes and reports the median slope. This is more robust to irregular/noisy data than a simple average."],
         ["Mann-Kendall", "Counts whether later weekly values are generally higher or lower than earlier values. S > 0 means increasing depth, which indicates declining groundwater."],
-        ["Red dashboard color", "Only wards with enough cleaned data and at least two trend methods indicating decline are marked Critical/red. Wards without enough weekly data stay normal and explain why in updateReason."]
+        ["Red dashboard color", `A ward must have enough cleaned data, at least two trend methods indicating decline, and rank within the top ${CRITICAL_GW_MAX_CURRENT_WARDS} strongest decline candidates by linear slope. Wards below this cutoff stay normal and explain why in updateReason.`]
       ]
     }
   ];
