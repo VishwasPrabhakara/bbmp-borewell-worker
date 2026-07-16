@@ -4053,10 +4053,7 @@ export default {
         return json(wardNo ? {
           ward: payload.wards.find(ward => normalizeWardNoValue(ward.wardNo) === normalizedWardNo) || null,
           weeks: payload.weeks
-        } : {
-          ...payload,
-          criticalGroundwater: criticalGroundwaterRows(payload).rows
-        });
+        } : payload);
       }
 
       if (url.pathname === "/api/indicators/wards") {
