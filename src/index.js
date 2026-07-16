@@ -1488,8 +1488,8 @@ const MONTHLY_SPECIFIC_CAPACITY_HEADERS = [
   "Stop Discharge (m3/s)",
   "Lowest Discharge (m3/s)",
   "Pumping Duration (s)",
-  "Transmissivity (x10^-6 m2/s)",
-  "Inverse of Transmissivity (s/m2)"
+  "Specific Capacity (x10^-6 m2/s)",
+  "Inverse Specific Capacity (s/m2)"
 ];
 
 function monthLabelFromDatePart(day) {
@@ -1574,8 +1574,8 @@ function sessionDayValue(rows, field) {
         "Stop Discharge (m3/s)": Number.isFinite(stopDischarge) ? roundNumber(stopDischarge * LPM_TO_M3_PER_SEC, 8) : "",
         "Lowest Discharge (m3/s)": roundNumber(converted.lowestDischargeM3s, 8),
         "Pumping Duration (s)": row.duration_min == null ? "" : Math.round(Number(row.duration_min) * 60),
-        "Transmissivity (x10^-6 m2/s)": Number.isFinite(converted.specificCapacityM3sPerM) ? roundNumber(converted.specificCapacityM3sPerM * TRANSMISSIVITY_SCALE, 4) : "",
-        "Inverse of Transmissivity (s/m2)": roundNumber(inverseSpecificCapacity(converted.specificCapacityM3sPerM, converted.drawdownM, converted.lowestDischargeM3s), 2)
+        "Specific Capacity (x10^-6 m2/s)": Number.isFinite(converted.specificCapacityM3sPerM) ? roundNumber(converted.specificCapacityM3sPerM * TRANSMISSIVITY_SCALE, 4) : "",
+        "Inverse Specific Capacity (s/m2)": roundNumber(inverseSpecificCapacity(converted.specificCapacityM3sPerM, converted.drawdownM, converted.lowestDischargeM3s), 2)
       };
       return map[field];
     })
