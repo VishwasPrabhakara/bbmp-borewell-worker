@@ -954,7 +954,7 @@ function criticalGroundwaterRows(payload) {
   return { rows, pairRows };
 }
 
-async function khWeeklyPayload(sql) {
+async function khWeeklyPayload(sql, includeSensorDetails = false) {
   const qcRows = await sql`
     SELECT uid, ward_no, ward_name, qc_status
     FROM sensor_qc_summary
@@ -1009,7 +1009,7 @@ async function khWeeklyPayload(sql) {
     ) points
     ORDER BY ward_no, uid, reading_time
   `;
-  return weeklyWardPayload(rows, qcRows, true);
+  return weeklyWardPayload(rows, qcRows, includeSensorDetails);
 }
 
 function criticalGroundwaterExcelResponse(payload, filename = "critical_wards_groundwater_update.xlsx") {
