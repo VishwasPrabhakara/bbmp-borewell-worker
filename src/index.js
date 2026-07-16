@@ -380,7 +380,10 @@ function weekNumberForDate(date) {
 }
 
 function rollingWeeklyPoints(points) {
-  const cleaned = cleanLevelPoints(points);
+  return rollingWeeklyPointsFromCleaned(cleanLevelPoints(points));
+}
+
+function rollingWeeklyPointsFromCleaned(cleaned) {
   const selected = [];
   let previousTime = null;
   for (const point of cleaned) {
@@ -543,14 +546,14 @@ function weeklyWardPayload(rows, qcRows, includeSensorDetails = false) {
 
   const sensors = Array.from(sensorMap.values()).map(sensor => {
     const cleanedDaily = cleanLevelPoints(sensor.rawPoints);
-    const weeklyPoints = rollingWeeklyPoints(sensor.rawPoints);
-    const dailyDrops = consecutiveDrops(cleanedDaily.map(point => ({
+    const weeklyPoints = rollingWeeklyPointsFromCleaned(cleanedDaily);
+    const dailyDrops = includeSensorDetails ? consecutiveDrops(cleanedDaily.map(point => ({
       label: new Date(point.time).toISOString().slice(0, 10),
       time: point.time,
       level: point.level
-    })));
-    const weeklyDrops = consecutiveDrops(weeklyPoints);
-    const drawdowns = sessionDrawdowns(cleanedDaily);
+    }))) : [];
+    const weeklyDrops = includeSensorDetails ? consecutiveDrops(weeklyPoints) : [];
+    const drawdowns = includeSensorDetails ? sessionDrawdowns(cleanedDaily) : [];
     return {
       uid: sensor.uid,
       wardNo: sensor.wardNo,
