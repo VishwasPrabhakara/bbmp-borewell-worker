@@ -13,6 +13,17 @@ const CRITICAL_GW_RELATIVE_JUMP_RATIO = 10;
 const CRITICAL_GW_MIN_LARGE_JUMP_FT = 50;
 const CRITICAL_GW_DECLINE_FT_PER_WEEK = 0.1;
 const CRITICAL_GW_MAX_CURRENT_WARDS = 60;
+const API_CACHE_SECONDS = 60 * 60;
+const CACHEABLE_GET_PATHS = new Set([
+  "/api/sensors",
+  "/api/qc/sensors",
+  "/api/qc/wards",
+  "/api/ward-weekly-levels",
+  "/api/critical-wards-groundwater",
+  "/api/population/wards",
+  "/api/water-level",
+  "/api/specific-capacity/ward"
+]);
 const PREVIOUS_CRITICAL_WARDS = [
   ["48", "Muneshwaranagar"],
   ["33", "Manorayanapalya"],
@@ -86,6 +97,36 @@ function json(data, status = 200) {
       "access-control-allow-headers": "content-type,x-admin-password"
     }
   });
+}
+
+function cacheKey(request) {
+  const url = new URL(request.url);
+  url.searchParams.sort();
+  return new Request(url.toString(), { method: "GET" });
+}
+
+async function cachedJson(request, data, seconds = API_CACHE_SECONDS) {
+  const response = json(data);
+  if (request.method === "GET" && CACHEABLE_GET_PATHS.has(new URL(request.url).pathname)) {
+    response.headers.set("cache-control", `public, max-age=${seconds}, s-maxage=${seconds}`);
+    await caches.default.put(cacheKey(request), response.clone()).catch(() => {});
+  }
+  return response;
+}
+
+async function cachedFallback(request) {
+  if (request.method !== "GET" || !CACHEABLE_GET_PATHS.has(new URL(request.url).pathname)) return null;
+  const cached = await caches.default.match(cacheKey(request)).catch(() => null);
+  if (!cached) return null;
+  const response = new Response(cached.body, cached);
+  response.headers.set("access-control-allow-origin", "*");
+  response.headers.set("x-dashboard-cache-fallback", "true");
+  return response;
+}
+
+function isNeonQuotaError(error) {
+  const message = String(error?.message || error || "").toLowerCase();
+  return message.includes("exceeded the data transfer quota") || message.includes("http status 402");
 }
 
 function html(body, status = 200) {
@@ -2715,7 +2756,7 @@ export default {
             FROM vendor_sensors
             ORDER BY device_name
           `;
-          return json({
+          return cachedJson(request, {
             source: "vendor",
             sensors: rows.map(row => ({
               uid: row.uid,
@@ -2763,7 +2804,7 @@ export default {
           ORDER BY COALESCE(s.uid, uploaded.uid)
         `;
 
-        return json({
+        return cachedJson(request, {
           sensors: rows.map(row => ({
             uid: row.uid,
             lat: row.lat,
@@ -3940,7 +3981,7 @@ export default {
             ORDER BY q.ward_no, q.uid, v.updated_at
           `;
           const payload = weeklyWardPayload(rows, qcRows, Boolean(wardNo));
-          return json(wardNo ? {
+          return cachedJson(request, wardNo ? {
             source: "vendor",
             ward: payload.wards.find(ward => normalizeWardNoValue(ward.wardNo) === normalizedWardNo) || null,
             weeks: payload.weeks
@@ -4053,7 +4094,7 @@ export default {
         `;
 
         const payload = weeklyWardPayload(rows, qcRows, Boolean(wardNo));
-        return json(wardNo ? {
+        return cachedJson(request, wardNo ? {
           ward: payload.wards.find(ward => normalizeWardNoValue(ward.wardNo) === normalizedWardNo) || null,
           weeks: payload.weeks
         } : payload);
@@ -4197,6 +4238,16 @@ export default {
 
       return json({ error: "Not found" }, 404);
     } catch (error) {
+      if (isNeonQuotaError(error)) {
+        const fallback = await cachedFallback(request);
+        if (fallback) return fallback;
+        return json({
+          error: "Database transfer quota exceeded",
+          message: "Neon has exceeded its data-transfer quota, so live database reads are temporarily unavailable. The dashboard will work again after the quota resets or the plan is upgraded.",
+          retryable: true
+        }, 503);
+      }
+
       if (isMissingRelation(error)) {
         if (url.pathname === "/api/status") {
           return json(statusPayload({ running: false, ok: null, message: "Database is not initialized yet" }));
