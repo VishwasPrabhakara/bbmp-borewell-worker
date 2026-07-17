@@ -823,20 +823,17 @@ function trendMethods(points, comparisons = []) {
 function combinedGroundwaterStatus(methods, hasEnough) {
   if (!hasEnough) return { status: "Normal", direction: "Not computed", votes: 0 };
   const linear = Number(methods.linearSlopeFtPerWeek);
-  const sen = Number(methods.senSlopeFtPerWeek);
   const mkS = Number(methods.mannKendallS);
   const decliningVotes = [
     Number.isFinite(linear) && linear > CRITICAL_GW_DECLINE_FT_PER_WEEK,
-    Number.isFinite(sen) && sen > CRITICAL_GW_DECLINE_FT_PER_WEEK,
     Number.isFinite(mkS) && mkS > 0
   ].filter(Boolean).length;
   const improvingVotes = [
     Number.isFinite(linear) && linear < -CRITICAL_GW_DECLINE_FT_PER_WEEK,
-    Number.isFinite(sen) && sen < -CRITICAL_GW_DECLINE_FT_PER_WEEK,
     Number.isFinite(mkS) && mkS < 0
   ].filter(Boolean).length;
-  if (decliningVotes >= 2) return { status: "Critical", direction: "Declining", votes: decliningVotes };
-  if (improvingVotes >= 2) return { status: "Normal", direction: "Improving", votes: -improvingVotes };
+  if (decliningVotes === 2) return { status: "Critical", direction: "Declining", votes: decliningVotes };
+  if (improvingVotes === 2) return { status: "Normal", direction: "Improving", votes: -improvingVotes };
   return { status: "Normal", direction: "Mostly stable", votes: decliningVotes };
 }
 
@@ -864,8 +861,8 @@ function criticalGroundwaterRows(payload) {
         : comparisons.length < CRITICAL_GW_MIN_COMPARISONS
           ? `Not computed because only ${comparisons.length} valid week-to-week comparisons remain after gap/jump cleaning; minimum required is ${CRITICAL_GW_MIN_COMPARISONS}.`
           : groundwaterCritical
-            ? "Computed as critical because at least two trend methods indicate declining groundwater."
-            : "Computed as normal because the trend methods do not jointly indicate decline.";
+            ? "Computed as critical because linear slope and Mann-Kendall both indicate declining groundwater."
+            : "Computed as normal because linear slope and Mann-Kendall do not both indicate decline.";
 
     const row = {
       wardNo,
@@ -977,7 +974,7 @@ function criticalGroundwaterRows(payload) {
       row.groundwaterDirection = "Declining but below top-60 threshold";
       row.updateReason = `Not colored critical because it is ranked ${index + 1} by decline strength; dashboard red wards are limited to the top ${CRITICAL_GW_MAX_CURRENT_WARDS} strongest groundwater-decline candidates.`;
     } else {
-      row.updateReason = `Computed as critical because at least two trend methods indicate decline and this ward is within the top ${CRITICAL_GW_MAX_CURRENT_WARDS} strongest groundwater-decline candidates.`;
+      row.updateReason = `Computed as critical because linear slope and Mann-Kendall both indicate decline and this ward is within the top ${CRITICAL_GW_MAX_CURRENT_WARDS} strongest groundwater-decline candidates.`;
     }
   });
 
@@ -1131,7 +1128,7 @@ function criticalGroundwaterExcelResponse(payload, filename = "critical_wards_gr
         ["Linear regression", "Fits one straight line through the weekly average groundwater points. Slope is reported in ft/week and ft/day."],
         ["Sen slope", "Calculates pairwise weekly slopes and reports the median slope. This is more robust to irregular/noisy data than a simple average."],
         ["Mann-Kendall", "Counts whether later weekly values are generally higher or lower than earlier values. S > 0 means increasing depth, which indicates declining groundwater."],
-        ["Red dashboard color", `A ward must have enough cleaned data, at least two trend methods indicating decline, and rank within the top ${CRITICAL_GW_MAX_CURRENT_WARDS} strongest decline candidates by linear slope. Wards below this cutoff stay normal and explain why in updateReason.`]
+        ["Red dashboard color", `A ward must have enough cleaned data, both linear slope and Mann-Kendall indicating decline, and rank within the top ${CRITICAL_GW_MAX_CURRENT_WARDS} strongest decline candidates by linear slope. Wards below this cutoff stay normal and explain why in updateReason.`]
       ]
     }
   ];
