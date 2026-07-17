@@ -3380,7 +3380,7 @@ export default {
         sensorRows.sort((a, b) => (b.averageSpecificCapacityM2s || 0) - (a.averageSpecificCapacityM2s || 0) || String(a.uid).localeCompare(String(b.uid)));
         const allValues = sensorRows.flatMap(sensor => sensor.sessions.map(session => Number(session.specificCapacityM2s))).filter(Number.isFinite);
         const allInverseValues = sensorRows.flatMap(sensor => sensor.sessions.map(session => Number(session.inverseSpecificCapacitySPerM2))).filter(Number.isFinite);
-        return json({
+        return cachedJson(request, {
           ward: sensorRows.length ? {
             wardNo: sensorRows[0].wardNo,
             wardName: sensorRows[0].wardName,
