@@ -2496,6 +2496,30 @@ function adminPage() {
       return Number.isFinite(parsed) ? parsed : null;
     }
 
+    function median(values) {
+      const sorted = values.filter(value => Number.isFinite(value)).sort((a, b) => a - b);
+      if (!sorted.length) return null;
+      const middle = Math.floor(sorted.length / 2);
+      return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+    }
+
+    function waterLevelConverters(values) {
+      const center = median(values);
+      if (center === null) {
+        return { toM: () => null, toFt: () => null };
+      }
+      if (center > 120) {
+        return {
+          toM: value => value === null ? null : value / M_TO_FT,
+          toFt: value => value
+        };
+      }
+      return {
+        toM: value => value,
+        toFt: value => value === null ? null : value * M_TO_FT
+      };
+    }
+
     function khTime(value) {
       const match = String(value || '').trim().match(/^(\\d{2})(\\d{2})(\\d{2})\\s+(\\d{2})(\\d{2})(\\d{2})$/);
       if (!match) return null;
@@ -2602,12 +2626,21 @@ function adminPage() {
         }
 
         if (info.kind === 'TYPEB') {
+          const rawLevels = rows.flatMap(row => [
+            number(row['water level at start (m below surface)']),
+            number(row['water level at stop (m below surface)'])
+          ]).filter(value => value !== null);
+          const converters = waterLevelConverters(rawLevels);
           const parsed = rows.map(row => {
             const start = khTime(row['timestamp_start (ddmmyy hhmmss)']);
             const stop = khTime(row['timestamp_stop (ddmmyy hhmmss)']);
-            const startM = number(row['water level at start (m below surface)']);
-            const stopM = number(row['water level at stop (m below surface)']);
-            if (!start || !stop || startM === null || stopM === null || stopM <= startM) return null;
+            const startRaw = number(row['water level at start (m below surface)']);
+            const stopRaw = number(row['water level at stop (m below surface)']);
+            const startM = converters.toM(startRaw);
+            const stopM = converters.toM(stopRaw);
+            const startFt = converters.toFt(startRaw);
+            const stopFt = converters.toFt(stopRaw);
+            if (!start || !stop || startFt === null || stopFt === null || stopFt <= startFt) return null;
             return {
               uid: info.uid,
               lat,
@@ -2617,10 +2650,10 @@ function adminPage() {
               stop_time: stop,
               tts_start_seconds: number(row['TTS at start (seconds)']),
               water_level_start_m: startM,
-              water_level_start_ft: startM * M_TO_FT,
+              water_level_start_ft: startFt,
               tts_stop_seconds: number(row['TTS at stop (seconds)']),
               water_level_stop_m: stopM,
-              water_level_stop_ft: stopM * M_TO_FT,
+              water_level_stop_ft: stopFt,
               session_duration_min: number(row['session duration (min)'])
             };
           }).filter(Boolean);
