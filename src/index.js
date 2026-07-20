@@ -12,7 +12,9 @@ const CRITICAL_GW_MAX_WEEK_GAP = 2;
 const CRITICAL_GW_RELATIVE_JUMP_RATIO = 10;
 const CRITICAL_GW_MIN_LARGE_JUMP_FT = 50;
 const CRITICAL_GW_DECLINE_FT_PER_WEEK = 0.1;
-const CRITICAL_GW_MAX_CURRENT_WARDS = 60;
+const TREND_SIGNIFICANCE_ALPHA = 0.05;
+const WARD_MIN_CLASSIFIED_SENSORS = 2;
+const WARD_DECLINING_SENSOR_FRACTION = 0.5;
 const API_CACHE_SECONDS = 60 * 60;
 const CACHEABLE_GET_PATHS = new Set([
   "/api/sensors",
@@ -632,6 +634,32 @@ function weeklyWardPayload(rows, qcRows, includeSensorDetails = false) {
   allWeekLabels.sort((a, b) => (weekTimes.get(a) || 0) - (weekTimes.get(b) || 0));
 
   for (const sensor of sensors) {
+    const weekly = sensor.points.map(point => ({
+      label: point.label,
+      averageLevel: point.level,
+      sensorCount: 1
+    }));
+    const { points, comparisons } = validCriticalComparisons(weekly, allWeekLabels);
+    const hasEnough = points.length >= CRITICAL_GW_MIN_WEEKS
+      && comparisons.length >= CRITICAL_GW_MIN_COMPARISONS;
+    const methods = trendMethods(points, comparisons);
+    const classification = combinedGroundwaterStatus(methods, hasEnough);
+    sensor.groundwaterTrend = {
+      classification: classification.direction,
+      status: classification.status,
+      evidence: classification.evidence,
+      usableWeeklyValues: points.length,
+      validWeeklyComparisons: comparisons.length,
+      theilSenSlopeFtPerWeek: methods.senSlopeFtPerWeek,
+      theilSenSlopeFtPerDay: methods.senSlopeFtPerDay,
+      mannKendallS: methods.mannKendallS,
+      mannKendallPValue: methods.mannKendallPValue,
+      linearSlopeFtPerWeek: methods.linearSlopeFtPerWeek,
+      linearR2: methods.linearR2
+    };
+  }
+
+  for (const sensor of sensors) {
     const ward = wardMap.get(String(sensor.wardNo));
     if (ward && sensor.isQcGood) ward.sensors.push(sensor);
   }
@@ -652,6 +680,29 @@ function weeklyWardPayload(rows, qcRows, includeSensorDetails = false) {
     ward.medianDropPerDay = wardDrops.length ? roundNumber(median(wardDrops), 4) : null;
     ward.maxDropPerDay = wardDrops.length ? roundNumber(Math.max(...wardDrops), 4) : null;
     ward.dropAllPositive = wardDrops.length ? wardDrops.every(value => value > 0) : false;
+    const classifiedSensors = ward.sensors.filter(sensor => sensor.groundwaterTrend?.evidence !== "insufficient");
+    const confirmedDecliningSensors = classifiedSensors.filter(sensor => sensor.groundwaterTrend?.evidence === "confirmed"
+      && sensor.groundwaterTrend?.classification === "Declining");
+    const possibleDecliningSensors = classifiedSensors.filter(sensor => ["Declining", "Possible decline"]
+      .includes(sensor.groundwaterTrend?.classification));
+    const improvingSensors = classifiedSensors.filter(sensor => ["Improving", "Possible improvement"]
+      .includes(sensor.groundwaterTrend?.classification));
+    const sensorSlopes = classifiedSensors
+      .map(sensor => Number(sensor.groundwaterTrend?.theilSenSlopeFtPerWeek))
+      .filter(Number.isFinite);
+    ward.trendSensorSummary = {
+      classifiedSensorCount: classifiedSensors.length,
+      confirmedDecliningSensorCount: confirmedDecliningSensors.length,
+      decliningSensorCount: possibleDecliningSensors.length,
+      improvingSensorCount: improvingSensors.length,
+      medianTheilSenSlopeFtPerWeek: roundNumber(median(sensorSlopes), 4),
+      decliningSensorPercent: classifiedSensors.length
+        ? roundNumber((possibleDecliningSensors.length / classifiedSensors.length) * 100, 1)
+        : null,
+      confirmedDecliningSensorPercent: classifiedSensors.length
+        ? roundNumber((confirmedDecliningSensors.length / classifiedSensors.length) * 100, 1)
+        : null
+    };
     ward.weekly = allWeekLabels.map(label => {
       const values = ward.sensors
         .map(sensor => sensor.points.find(point => point.label === label)?.level)
@@ -722,7 +773,9 @@ function validCriticalComparisons(weekly, weeks) {
       sensorCount: Math.min(current.sensorCount, next.sensorCount)
     });
   }
-  return { points, comparisons, skipped };
+  const comparisonLabels = new Set(comparisons.flatMap(item => [item.fromLabel, item.toLabel]));
+  const trendPoints = points.filter(point => comparisonLabels.has(point.label));
+  return { points: trendPoints, comparisons, skipped };
 }
 
 function criticalDirection(changeFtPerWeek) {
@@ -781,10 +834,8 @@ function trendMethods(points, comparisons = []) {
       if (dx > 0) pairSlopes.push((usablePoints[j].level - usablePoints[i].level) / dx);
     }
   }
-  const validComparisonSlopes = (comparisons || [])
-    .map(item => Number(item.changeFtPerWeek))
-    .filter(value => Number.isFinite(value));
-  const senSlope = median(validComparisonSlopes.length ? validComparisonSlopes : pairSlopes);
+  // Theil-Sen is the median of every valid pairwise slope, not only adjacent weeks.
+  const senSlope = median(pairSlopes);
 
   let s = 0;
   for (let i = 0; i < usablePoints.length - 1; i += 1) {
@@ -821,20 +872,26 @@ function trendMethods(points, comparisons = []) {
 }
 
 function combinedGroundwaterStatus(methods, hasEnough) {
-  if (!hasEnough) return { status: "Normal", direction: "Not computed", votes: 0 };
-  const linear = Number(methods.linearSlopeFtPerWeek);
+  if (!hasEnough) return { status: "Insufficient data", direction: "Not computed", evidence: "insufficient", votes: 0 };
+  const sen = Number(methods.senSlopeFtPerWeek);
   const mkS = Number(methods.mannKendallS);
-  const decliningVotes = [
-    Number.isFinite(linear) && linear > CRITICAL_GW_DECLINE_FT_PER_WEEK,
-    Number.isFinite(mkS) && mkS > 0
-  ].filter(Boolean).length;
-  const improvingVotes = [
-    Number.isFinite(linear) && linear < -CRITICAL_GW_DECLINE_FT_PER_WEEK,
-    Number.isFinite(mkS) && mkS < 0
-  ].filter(Boolean).length;
-  if (decliningVotes === 2) return { status: "Critical", direction: "Declining", votes: decliningVotes };
-  if (improvingVotes === 2) return { status: "Normal", direction: "Improving", votes: -improvingVotes };
-  return { status: "Normal", direction: "Mostly stable", votes: decliningVotes };
+  const mkP = Number(methods.mannKendallPValue);
+  const significant = Number.isFinite(mkP) && mkP <= TREND_SIGNIFICANCE_ALPHA;
+  const decliningMagnitude = Number.isFinite(sen) && sen > CRITICAL_GW_DECLINE_FT_PER_WEEK;
+  const improvingMagnitude = Number.isFinite(sen) && sen < -CRITICAL_GW_DECLINE_FT_PER_WEEK;
+  if (decliningMagnitude && mkS > 0 && significant) {
+    return { status: "Critical", direction: "Declining", evidence: "confirmed", votes: 2 };
+  }
+  if (improvingMagnitude && mkS < 0 && significant) {
+    return { status: "Normal", direction: "Improving", evidence: "confirmed", votes: -2 };
+  }
+  if (decliningMagnitude && mkS > 0) {
+    return { status: "Watch", direction: "Possible decline", evidence: "emerging", votes: 1 };
+  }
+  if (improvingMagnitude && mkS < 0) {
+    return { status: "Normal", direction: "Possible improvement", evidence: "emerging", votes: -1 };
+  }
+  return { status: "Normal", direction: "Mostly stable", evidence: "stable", votes: 0 };
 }
 
 function criticalGroundwaterRows(payload, options = {}) {
@@ -853,9 +910,25 @@ function criticalGroundwaterRows(payload, options = {}) {
       ? comparisons.reduce((sum, item) => sum + item.changeFtPerWeek, 0) / comparisons.length
       : null;
     const methods = trendMethods(points, comparisons);
-    const combined = combinedGroundwaterStatus(methods, hasEnough);
-    const direction = combined.direction;
-    const groundwaterCritical = combined.status === "Critical";
+    const wardTrend = combinedGroundwaterStatus(methods, hasEnough);
+    const sensorSummary = ward.trendSensorSummary || {};
+    const classifiedSensorCount = Number(sensorSummary.classifiedSensorCount || 0);
+    const decliningSensorCount = Number(sensorSummary.decliningSensorCount || 0);
+    const confirmedDecliningSensorCount = Number(sensorSummary.confirmedDecliningSensorCount || 0);
+    const medianSensorSlope = Number(sensorSummary.medianTheilSenSlopeFtPerWeek);
+    const decliningSensorFraction = classifiedSensorCount ? confirmedDecliningSensorCount / classifiedSensorCount : 0;
+    const hasSensorAgreement = classifiedSensorCount >= WARD_MIN_CLASSIFIED_SENSORS
+      && decliningSensorFraction >= WARD_DECLINING_SENSOR_FRACTION
+      && Number.isFinite(medianSensorSlope)
+      && medianSensorSlope > CRITICAL_GW_DECLINE_FT_PER_WEEK;
+    const groundwaterCritical = hasSensorAgreement;
+    const groundwaterWatch = !groundwaterCritical
+      && (wardTrend.status === "Critical" || wardTrend.status === "Watch" || hasSensorAgreement);
+    const direction = groundwaterCritical
+      ? "Declining"
+      : groundwaterWatch
+        ? "Needs review"
+        : wardTrend.direction;
     const reason = !ward.goodSensors
       ? "No GOOD sensors with cleaned weekly groundwater levels are available."
       : points.length < CRITICAL_GW_MIN_WEEKS
@@ -863,15 +936,17 @@ function criticalGroundwaterRows(payload, options = {}) {
         : comparisons.length < CRITICAL_GW_MIN_COMPARISONS
           ? `Not computed because only ${comparisons.length} valid week-to-week comparisons remain after gap/jump cleaning; minimum required is ${CRITICAL_GW_MIN_COMPARISONS}.`
           : groundwaterCritical
-            ? "Computed as critical because linear slope and Mann-Kendall both indicate declining groundwater."
-            : "Computed as normal because linear slope and Mann-Kendall do not both indicate decline.";
+            ? `Critical: the median borewell Theil-Sen slope is ${roundNumber(medianSensorSlope, 2)} ft/week and ${confirmedDecliningSensorCount}/${classifiedSensorCount} classifiable borewells independently show significant decline (Mann-Kendall p <= ${TREND_SIGNIFICANCE_ALPHA}).`
+            : groundwaterWatch
+              ? `Watch: some decline evidence exists, but the ward does not yet satisfy both a significant ward trend and at least ${Math.round(WARD_DECLINING_SENSOR_FRACTION * 100)}% declining borewells from a minimum of ${WARD_MIN_CLASSIFIED_SENSORS} classified sensors.`
+              : "Normal/stable: the cleaned observations do not provide statistically significant, borewell-supported evidence of groundwater decline.";
 
     const row = {
       wardNo,
       wardName: ward.wardName || critical.get(wardNo) || "",
       previousCriticalWard: previousCritical ? "Yes" : "No",
       previousCriticalWardName: critical.get(wardNo) || "",
-      groundwaterStatus: groundwaterCritical ? "Critical" : "Normal",
+      groundwaterStatus: groundwaterCritical ? "Critical" : groundwaterWatch ? "Watch" : "Normal",
       groundwaterDirection: direction,
       computed: hasEnough ? "Yes" : "No",
       totalSensors: ward.totalSensors || 0,
@@ -881,8 +956,16 @@ function criticalGroundwaterRows(payload, options = {}) {
       skippedComparisons: skipped.length,
       averageChangeFtPerWeek: roundNumber(averageChange, 4),
       averageChangeFtPerDay: roundNumber(Number.isFinite(averageChange) ? averageChange / 7 : null, 4),
-      declineMethodVotes: combined.votes,
-      declineStrengthFtPerWeek: methods.linearSlopeFtPerWeek,
+      declineMethodVotes: wardTrend.votes,
+      trendEvidence: wardTrend.evidence,
+      classifiedSensorCount,
+      decliningSensorCount,
+      confirmedDecliningSensorCount,
+      improvingSensorCount: Number(sensorSummary.improvingSensorCount || 0),
+      decliningSensorPercent: Number.isFinite(Number(sensorSummary.decliningSensorPercent)) ? Number(sensorSummary.decliningSensorPercent) : null,
+      confirmedDecliningSensorPercent: Number.isFinite(Number(sensorSummary.confirmedDecliningSensorPercent)) ? Number(sensorSummary.confirmedDecliningSensorPercent) : null,
+      medianSensorTheilSenSlopeFtPerWeek: Number.isFinite(medianSensorSlope) ? medianSensorSlope : null,
+      declineStrengthFtPerWeek: Number.isFinite(medianSensorSlope) ? medianSensorSlope : methods.senSlopeFtPerWeek,
       topDeclineRank: null,
       linearSlopeFtPerWeek: methods.linearSlopeFtPerWeek,
       linearSlopeFtPerDay: methods.linearSlopeFtPerDay,
@@ -965,23 +1048,15 @@ function criticalGroundwaterRows(payload, options = {}) {
 
   const allRows = Array.from(rowsByWard.values());
   const declineCandidates = allRows
-    .filter(row => row.groundwaterStatus === "Critical")
+    .filter(row => row.groundwaterStatus === "Critical" || row.groundwaterStatus === "Watch")
     .sort((a, b) => {
       const aStrength = Number.isFinite(Number(a.declineStrengthFtPerWeek)) ? Number(a.declineStrengthFtPerWeek) : -999999;
       const bStrength = Number.isFinite(Number(b.declineStrengthFtPerWeek)) ? Number(b.declineStrengthFtPerWeek) : -999999;
       if (bStrength !== aStrength) return bStrength - aStrength;
       return Number(a.wardNo) - Number(b.wardNo);
     });
-  const topCriticalWardNos = new Set(declineCandidates.slice(0, CRITICAL_GW_MAX_CURRENT_WARDS).map(row => row.wardNo));
   declineCandidates.forEach((row, index) => {
     row.topDeclineRank = index + 1;
-    if (!topCriticalWardNos.has(row.wardNo)) {
-      row.groundwaterStatus = "Normal";
-      row.groundwaterDirection = "Declining but below top-60 threshold";
-      row.updateReason = `Not colored critical because it is ranked ${index + 1} by decline strength; dashboard red wards are limited to the top ${CRITICAL_GW_MAX_CURRENT_WARDS} strongest groundwater-decline candidates.`;
-    } else {
-      row.updateReason = `Computed as critical because linear slope and Mann-Kendall both indicate decline and this ward is within the top ${CRITICAL_GW_MAX_CURRENT_WARDS} strongest groundwater-decline candidates.`;
-    }
   });
 
   const rows = allRows.sort((a, b) => {
@@ -1079,6 +1154,14 @@ function criticalGroundwaterExcelResponse(payload, filename = "critical_wards_gr
     "averageChangeFtPerWeek",
     "averageChangeFtPerDay",
     "declineMethodVotes",
+    "trendEvidence",
+    "classifiedSensorCount",
+    "decliningSensorCount",
+    "confirmedDecliningSensorCount",
+    "improvingSensorCount",
+    "decliningSensorPercent",
+    "confirmedDecliningSensorPercent",
+    "medianSensorTheilSenSlopeFtPerWeek",
     "declineStrengthFtPerWeek",
     "topDeclineRank",
     "linearSlopeFtPerWeek",
@@ -1132,9 +1215,11 @@ function criticalGroundwaterExcelResponse(payload, filename = "critical_wards_gr
         ["Large jump rule", `A comparison is skipped as likely sensor/data error when the jump is at least ${CRITICAL_GW_MIN_LARGE_JUMP_FT} ft and one value is at least ${CRITICAL_GW_RELATIVE_JUMP_RATIO} times the other.`],
         ["Direction", "Positive change means feet below ground surface increased, so groundwater became deeper. Negative change means groundwater became shallower."],
         ["Linear regression", "Fits one straight line through the weekly average groundwater points. Slope is reported in ft/week and ft/day."],
-        ["Sen slope", "Calculates pairwise weekly slopes and reports the median slope. This is more robust to irregular/noisy data than a simple average."],
-        ["Mann-Kendall", "Counts whether later weekly values are generally higher or lower than earlier values. S > 0 means increasing depth, which indicates declining groundwater."],
-        ["Red dashboard color", `A ward must have enough cleaned data, both linear slope and Mann-Kendall indicating decline, and rank within the top ${CRITICAL_GW_MAX_CURRENT_WARDS} strongest decline candidates by linear slope. Wards below this cutoff stay normal and explain why in updateReason.`]
+        ["Theil-Sen slope", "Primary rate estimate: the median of pairwise weekly slopes, which is resistant to isolated abnormal readings."],
+        ["Mann-Kendall", `Tests whether the monotonic trend is statistically credible. A confirmed trend requires p <= ${TREND_SIGNIFICANCE_ALPHA}.`],
+        ["Borewell classification", "Each UID is classified independently as declining, improving, mostly stable, possible trend, or insufficient data using Theil-Sen magnitude and Mann-Kendall significance."],
+        ["Red dashboard color", `A ward is Critical only when its median borewell Theil-Sen rate exceeds ${CRITICAL_GW_DECLINE_FT_PER_WEEK} ft/week and at least ${Math.round(WARD_DECLINING_SENSOR_FRACTION * 100)}% of at least ${WARD_MIN_CLASSIFIED_SENSORS} classifiable borewells independently show significant decline.`],
+        ["Watch classification", "A ward is Watch when decline evidence is present but does not satisfy every Critical requirement. There is no arbitrary top-60 cutoff."]
       ]
     }
   ];
