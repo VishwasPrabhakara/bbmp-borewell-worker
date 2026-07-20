@@ -2117,9 +2117,21 @@ async function ensureUploadedTables(sql) {
       tts_stop_seconds DOUBLE PRECISION NULL,
       water_level_stop_m DOUBLE PRECISION NULL,
       water_level_stop_ft DOUBLE PRECISION NULL,
-      session_duration_min DOUBLE PRECISION NULL
+      session_duration_min DOUBLE PRECISION NULL,
+      min_discharge_lpm DOUBLE PRECISION NULL,
+      start_discharge_lpm DOUBLE PRECISION NULL,
+      stop_discharge_lpm DOUBLE PRECISION NULL,
+      avg_discharge_lpm DOUBLE PRECISION NULL,
+      max_discharge_lpm DOUBLE PRECISION NULL,
+      discharge_readings_in_session INTEGER DEFAULT 0
     )
   `;
+  await sql`ALTER TABLE uploaded_type_b_sessions ADD COLUMN IF NOT EXISTS min_discharge_lpm DOUBLE PRECISION NULL`;
+  await sql`ALTER TABLE uploaded_type_b_sessions ADD COLUMN IF NOT EXISTS start_discharge_lpm DOUBLE PRECISION NULL`;
+  await sql`ALTER TABLE uploaded_type_b_sessions ADD COLUMN IF NOT EXISTS stop_discharge_lpm DOUBLE PRECISION NULL`;
+  await sql`ALTER TABLE uploaded_type_b_sessions ADD COLUMN IF NOT EXISTS avg_discharge_lpm DOUBLE PRECISION NULL`;
+  await sql`ALTER TABLE uploaded_type_b_sessions ADD COLUMN IF NOT EXISTS max_discharge_lpm DOUBLE PRECISION NULL`;
+  await sql`ALTER TABLE uploaded_type_b_sessions ADD COLUMN IF NOT EXISTS discharge_readings_in_session INTEGER DEFAULT 0`;
 }
 
 async function ensureVendorTables(sql) {
@@ -3065,7 +3077,13 @@ export default {
                 b.session_duration_min,
                 EXTRACT(EPOCH FROM (b.stop_time - b.start_time)) / 60.0
               ) AS duration_min,
-              b.water_level_stop_ft - b.water_level_start_ft AS drawdown_ft
+              b.water_level_stop_ft - b.water_level_start_ft AS drawdown_ft,
+              b.min_discharge_lpm,
+              b.start_discharge_lpm,
+              b.stop_discharge_lpm,
+              b.avg_discharge_lpm,
+              b.max_discharge_lpm,
+              b.discharge_readings_in_session
             FROM uploaded_type_b_sessions b
             JOIN both_sensors bs ON bs.uid = b.uid
             WHERE b.start_time IS NOT NULL
@@ -3075,26 +3093,7 @@ export default {
               AND bs.ward_no IS NOT NULL
               AND bs.ward_no <> ''
           ),
-          session_discharge AS (
-            SELECT
-              s.*,
-              MIN(a.discharge) AS min_discharge_lpm,
-              (ARRAY_AGG(a.discharge ORDER BY a.time ASC))[1] AS start_discharge_lpm,
-              (ARRAY_AGG(a.discharge ORDER BY a.time DESC))[1] AS stop_discharge_lpm,
-              AVG(a.discharge) AS avg_discharge_lpm,
-              MAX(a.discharge) AS max_discharge_lpm,
-              COUNT(a.discharge) AS discharge_readings_in_session
-            FROM sessions s
-            JOIN uploaded_type_a_readings a
-              ON a.uid = s.uid
-             AND a.time >= s.start_time
-             AND a.time <= s.stop_time
-             AND a.discharge IS NOT NULL
-             AND a.discharge > 0
-            GROUP BY
-              s.uid, s.ward_no, s.ward_name, s.lat, s.lng, s.start_time, s.stop_time,
-              s.water_level_start_ft, s.water_level_stop_ft, s.duration_min, s.drawdown_ft
-          )
+          session_discharge AS (SELECT * FROM sessions WHERE min_discharge_lpm IS NOT NULL AND min_discharge_lpm > 0)
           SELECT
             ward_no,
             ward_name,
