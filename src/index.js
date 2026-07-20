@@ -837,7 +837,9 @@ function combinedGroundwaterStatus(methods, hasEnough) {
   return { status: "Normal", direction: "Mostly stable", votes: decliningVotes };
 }
 
-function criticalGroundwaterRows(payload) {
+function criticalGroundwaterRows(payload, options = {}) {
+  const includeWeeklyColumns = options.includeWeeklyColumns !== false;
+  const includePairRows = options.includePairRows !== false;
   const critical = criticalWardMap();
   const rowsByWard = new Map();
   const pairRows = [];
@@ -896,27 +898,31 @@ function criticalGroundwaterRows(payload) {
       updateReason: reason,
       skippedReasonDetails: skipped.join(" | ")
     };
-    for (const point of ward.weekly || []) {
-      row[`${point.label} average_level_ft`] = point.averageLevel;
-      row[`${point.label} sensor_count`] = point.sensorCount;
+    if (includeWeeklyColumns) {
+      for (const point of ward.weekly || []) {
+        row[`${point.label} average_level_ft`] = point.averageLevel;
+        row[`${point.label} sensor_count`] = point.sensorCount;
+      }
     }
     rowsByWard.set(wardNo, row);
 
-    for (const item of comparisons) {
-      pairRows.push([
-        wardNo,
-        row.wardName,
-        previousCritical ? "Yes" : "No",
-        item.fromLabel,
-        item.toLabel,
-        roundNumber(item.startLevel, 2),
-        roundNumber(item.endLevel, 2),
-        roundNumber(item.changeFt, 2),
-        roundNumber(item.changeFtPerWeek, 4),
-        roundNumber(item.changeFtPerDay, 4),
-        item.gap,
-        item.sensorCount
-      ]);
+    if (includePairRows) {
+      for (const item of comparisons) {
+        pairRows.push([
+          wardNo,
+          row.wardName,
+          previousCritical ? "Yes" : "No",
+          item.fromLabel,
+          item.toLabel,
+          roundNumber(item.startLevel, 2),
+          roundNumber(item.endLevel, 2),
+          roundNumber(item.changeFt, 2),
+          roundNumber(item.changeFtPerWeek, 4),
+          roundNumber(item.changeFtPerDay, 4),
+          item.gap,
+          item.sensorCount
+        ]);
+      }
     }
   }
 
@@ -3938,8 +3944,11 @@ export default {
         if (url.pathname.endsWith(".xlsx")) {
           return criticalGroundwaterExcelResponse(payload);
         }
-        const { rows } = criticalGroundwaterRows(payload);
-        return json({
+        const { rows } = criticalGroundwaterRows(payload, {
+          includeWeeklyColumns: false,
+          includePairRows: false
+        });
+        return cachedJson(request, {
           generatedAt: generatedAt.toISOString(),
           nextRecommendedUpdate: nextRecommendedUpdate.toISOString(),
           updateWindowDays,
