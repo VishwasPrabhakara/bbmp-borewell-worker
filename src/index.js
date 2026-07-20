@@ -251,6 +251,16 @@ function median(values) {
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
+function percentile(values, probability) {
+  const sorted = values.filter(value => Number.isFinite(value)).sort((a, b) => a - b);
+  if (!sorted.length) return null;
+  const position = (sorted.length - 1) * probability;
+  const lower = Math.floor(position);
+  const upper = Math.ceil(position);
+  if (lower === upper) return sorted[lower];
+  return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - lower);
+}
+
 function roundNumber(value, decimals = 4) {
   const numberValue = Number(value);
   if (!Number.isFinite(numberValue)) return null;
@@ -1080,55 +1090,134 @@ async function khWeeklyPayload(sql, includeSensorDetails = false) {
     WHERE ward_no IS NOT NULL
       AND ward_no <> ''
   `;
-  const rows = await sql`
+  const uploadedSessionCount = await sql`
+    SELECT COUNT(*)::integer AS count
+    FROM uploaded_type_b_sessions
+  `;
+  const hasUploadedSessions = Number(uploadedSessionCount?.[0]?.count || 0) > 0;
+  const rows = hasUploadedSessions ? await sql`
     WITH good_sensors AS (
       SELECT uid, ward_no, ward_name
       FROM sensor_qc_summary
       WHERE qc_status = 'GOOD'
         AND ward_no IS NOT NULL
         AND ward_no <> ''
-    ),
-    uploaded_uids AS (
-      SELECT DISTINCT uid FROM uploaded_type_b_sessions
-    ),
-    type_b_points AS (
-      SELECT
-        q.ward_no,
-        q.ward_name,
-        q.uid,
-        b.stop_time AS reading_time,
-        b.water_level_stop_ft AS water_level_ft,
-        b.water_level_stop_ft AS on_level,
-        b.water_level_start_ft AS off_level,
-        COALESCE(b.session_duration_min, EXTRACT(EPOCH FROM (b.stop_time - b.start_time)) / 60) / 60 AS runtime_hours
-      FROM uploaded_type_b_sessions b
-      JOIN good_sensors q ON q.uid = b.uid
-      WHERE b.water_level_stop_ft IS NOT NULL
-    ),
-    kh_points AS (
-      SELECT
-        q.ward_no,
-        q.ward_name,
-        q.uid,
-        w.time AS reading_time,
-        COALESCE(w.water_level, w.on_level, w.off_level) AS water_level_ft,
-        w.on_level,
-        w.off_level,
-        NULL::double precision AS runtime_hours
-      FROM water_levels w
-      JOIN good_sensors q ON q.uid = w.uid
-      WHERE q.uid NOT IN (SELECT uid FROM uploaded_uids)
-        AND COALESCE(w.water_level, w.on_level, w.off_level) IS NOT NULL
     )
-    SELECT ward_no, ward_name, uid, reading_time, water_level_ft, on_level, off_level, runtime_hours
-    FROM (
-      SELECT * FROM type_b_points
-      UNION ALL
-      SELECT * FROM kh_points
-    ) points
-    ORDER BY ward_no, uid, reading_time
+    SELECT
+      q.ward_no,
+      q.ward_name,
+      q.uid,
+      b.stop_time AS reading_time,
+      b.water_level_stop_ft AS water_level_ft,
+      b.water_level_stop_ft AS on_level,
+      b.water_level_start_ft AS off_level,
+      COALESCE(b.session_duration_min, EXTRACT(EPOCH FROM (b.stop_time - b.start_time)) / 60) / 60 AS runtime_hours
+    FROM uploaded_type_b_sessions b
+    JOIN good_sensors q ON q.uid = b.uid
+    WHERE b.water_level_stop_ft IS NOT NULL
+    ORDER BY q.ward_no, q.uid, b.stop_time
+  ` : await sql`
+    WITH good_sensors AS (
+      SELECT uid, ward_no, ward_name
+      FROM sensor_qc_summary
+      WHERE qc_status = 'GOOD'
+        AND ward_no IS NOT NULL
+        AND ward_no <> ''
+    )
+    SELECT
+      q.ward_no,
+      q.ward_name,
+      q.uid,
+      w.time AS reading_time,
+      COALESCE(w.water_level, w.on_level, w.off_level) AS water_level_ft,
+      w.on_level,
+      w.off_level,
+      NULL::double precision AS runtime_hours
+    FROM water_levels w
+    JOIN good_sensors q ON q.uid = w.uid
+    WHERE COALESCE(w.water_level, w.on_level, w.off_level) IS NOT NULL
+    ORDER BY q.ward_no, q.uid, w.time
   `;
   return weeklyWardPayload(rows, qcRows, includeSensorDetails);
+}
+
+async function specificCapacityWardSummaries(sql) {
+  const rows = await sql`
+    WITH warded_sessions AS (
+      SELECT
+        COALESCE(NULLIF(q.ward_no, ''), NULLIF(a.ward_no, '')) AS ward_no,
+        COALESCE(NULLIF(q.ward_name, ''), NULLIF(a.ward_name, '')) AS ward_name,
+        b.uid,
+        b.min_discharge_lpm,
+        b.water_level_stop_ft - b.water_level_start_ft AS drawdown_ft,
+        COALESCE(b.session_duration_min, EXTRACT(EPOCH FROM (b.stop_time - b.start_time)) / 60.0) AS duration_min
+      FROM uploaded_type_b_sessions b
+      LEFT JOIN sensor_qc_summary q ON q.uid = b.uid
+      LEFT JOIN sensor_ward_assignments a ON a.uid = b.uid
+      WHERE b.min_discharge_lpm IS NOT NULL
+        AND b.min_discharge_lpm > 0
+        AND b.water_level_start_ft IS NOT NULL
+        AND b.water_level_stop_ft IS NOT NULL
+        AND b.water_level_stop_ft > b.water_level_start_ft
+        AND COALESCE(b.session_duration_min, EXTRACT(EPOCH FROM (b.stop_time - b.start_time)) / 60.0) >= 0.5
+    ),
+    valid_sessions AS (
+      SELECT
+        ward_no,
+        ward_name,
+        uid,
+        (min_discharge_lpm * ${LPM_TO_M3_PER_SEC}) / (drawdown_ft * ${FT_TO_M}) AS specific_capacity_m2s,
+        (drawdown_ft * ${FT_TO_M}) / (min_discharge_lpm * ${LPM_TO_M3_PER_SEC}) AS inverse_specific_capacity_s_per_m2
+      FROM warded_sessions
+      WHERE ward_no IS NOT NULL
+        AND ward_no <> ''
+        AND drawdown_ft * ${FT_TO_M} >= ${MIN_MONTHLY_DRAWDOWN_M}
+    ),
+    uid_summary AS (
+      SELECT
+        ward_no,
+        ward_name,
+        uid,
+        COUNT(*)::integer AS valid_sessions,
+        AVG(specific_capacity_m2s) AS avg_specific_capacity_m2s,
+        MAX(specific_capacity_m2s) AS max_specific_capacity_m2s,
+        AVG(inverse_specific_capacity_s_per_m2) AS avg_inverse_specific_capacity_s_per_m2,
+        MAX(inverse_specific_capacity_s_per_m2) AS max_inverse_specific_capacity_s_per_m2
+      FROM valid_sessions
+      GROUP BY ward_no, ward_name, uid
+    )
+    SELECT
+      ward_no,
+      MAX(ward_name) AS ward_name,
+      COUNT(*)::integer AS uid_count,
+      SUM(valid_sessions)::integer AS valid_sessions,
+      AVG(avg_specific_capacity_m2s) AS average_specific_capacity_m2s,
+      MAX(max_specific_capacity_m2s) AS max_specific_capacity_m2s,
+      AVG(avg_inverse_specific_capacity_s_per_m2) AS average_inverse_specific_capacity_s_per_m2,
+      MAX(max_inverse_specific_capacity_s_per_m2) AS max_inverse_specific_capacity_s_per_m2,
+      STRING_AGG(uid, ', ' ORDER BY avg_specific_capacity_m2s DESC) AS uid_list
+    FROM uid_summary
+    GROUP BY ward_no
+  `;
+  const result = new Map();
+  for (const row of rows) {
+    const averageSpecificCapacity = Number(row.average_specific_capacity_m2s);
+    const maxSpecificCapacity = Number(row.max_specific_capacity_m2s);
+    result.set(normalizeWardNoValue(row.ward_no), {
+      wardNo: normalizeWardNoValue(row.ward_no),
+      wardName: row.ward_name,
+      uidCount: Number(row.uid_count || 0),
+      validSessions: Number(row.valid_sessions || 0),
+      averageSpecificCapacityM2s: Number.isFinite(averageSpecificCapacity) ? roundNumber(averageSpecificCapacity, 8) : null,
+      maxSpecificCapacityM2s: Number.isFinite(maxSpecificCapacity) ? roundNumber(maxSpecificCapacity, 8) : null,
+      averageTransmissivityScaled: Number.isFinite(averageSpecificCapacity) ? roundNumber(averageSpecificCapacity * TRANSMISSIVITY_SCALE, 4) : null,
+      maxTransmissivityScaled: Number.isFinite(maxSpecificCapacity) ? roundNumber(maxSpecificCapacity * TRANSMISSIVITY_SCALE, 4) : null,
+      averageInverseSpecificCapacitySPerM2: roundNumber(row.average_inverse_specific_capacity_s_per_m2, 2),
+      maxInverseSpecificCapacitySPerM2: roundNumber(row.max_inverse_specific_capacity_s_per_m2, 2),
+      uidList: row.uid_list || ""
+    });
+  }
+  return result;
 }
 
 function criticalGroundwaterExcelResponse(payload, filename = "critical_wards_groundwater_update.xlsx") {
@@ -1224,6 +1313,172 @@ function criticalGroundwaterExcelResponse(payload, filename = "critical_wards_gr
     }
   ];
   return multiSheetExcelResponse(sheets, filename);
+}
+
+async function criticalWardComparisonExcelResponse(sql) {
+  const payload = await khWeeklyPayload(sql);
+  const { rows } = criticalGroundwaterRows(payload, {
+    includeWeeklyColumns: false,
+    includePairRows: false
+  });
+  const capacityByWardNo = await specificCapacityWardSummaries(sql);
+  const rowsByWardNo = new Map(rows.map(row => [normalizeWardNoValue(row.wardNo), row]));
+  const previousCriticalMap = criticalWardMap();
+  const currentActionRows = rows.filter(row => row.groundwaterStatus === "Critical" || row.groundwaterStatus === "Watch");
+  const currentActionSet = new Set(currentActionRows.map(row => normalizeWardNoValue(row.wardNo)));
+  const previousCriticalSet = new Set(Array.from(previousCriticalMap.keys()));
+  const capacityValues = Array.from(capacityByWardNo.values())
+    .map(item => Number(item.averageSpecificCapacityM2s))
+    .filter(Number.isFinite);
+  const lowCapacityCutoff = percentile(capacityValues, 0.33);
+  const highCapacityCutoff = percentile(capacityValues, 0.67);
+  const capacityCategory = (capacity) => {
+    const value = Number(capacity?.averageSpecificCapacityM2s);
+    if (!Number.isFinite(value)) return "No valid specific-capacity sessions";
+    if (Number.isFinite(lowCapacityCutoff) && value <= lowCapacityCutoff) return "Low performance";
+    if (Number.isFinite(highCapacityCutoff) && value >= highCapacityCutoff) return "High performance";
+    return "Medium performance";
+  };
+  const capacityReason = (capacity) => {
+    const value = Number(capacity?.averageSpecificCapacityM2s);
+    if (!Number.isFinite(value)) return "No valid pumping sessions with positive drawdown, positive duration, and discharge.";
+    return `Average specific capacity is ${roundNumber(value * TRANSMISSIVITY_SCALE, 4)} x10^-6 m2/s; inverse average is ${roundNumber(capacity.averageInverseSpecificCapacitySPerM2, 0)} s/m2. Classification uses citywide ward percentiles.`;
+  };
+  const statusBucket = (row) => {
+    if (!row) return "No sensors available";
+    if (row.groundwaterStatus === "Critical" || row.groundwaterStatus === "Watch") return "Current critical/action";
+    if (row.computed === "Yes") return "Not current critical";
+    return "Data present but not enough cleaned weekly values";
+  };
+  const headers = [
+    "wardNo",
+    "wardName",
+    "previousConsumptionCritical",
+    "hasDashboardGroundwaterData",
+    "currentGroundwaterAction",
+    "groundwaterStatus",
+    "groundwaterDirection",
+    "groundwaterEvidence",
+    "currentGroundwaterReason",
+    "totalSensors",
+    "goodSensorsAfterQC",
+    "classifiableGroundwaterSensors",
+    "confirmedDecliningSensors",
+    "medianSensorTheilSenSlopeFtPerWeek",
+    "linearSlopeFtPerWeek",
+    "mannKendallPValue",
+    "specificCapacityUidCount",
+    "specificCapacityValidSessions",
+    "specificCapacityPerformance",
+    "averageSpecificCapacity_x10^-6_m2s",
+    "maxSpecificCapacity_x10^-6_m2s",
+    "averageInverseSpecificCapacity_s_per_m2",
+    "maxInverseSpecificCapacity_s_per_m2",
+    "specificCapacityReason",
+    "qcVsSpecificCapacityNote",
+    "uidList"
+  ];
+  const makeRow = (wardNo, fallbackName, previousCritical) => {
+    const normalizedWardNo = normalizeWardNoValue(wardNo);
+    const row = rowsByWardNo.get(normalizedWardNo);
+    const capacity = capacityByWardNo.get(normalizedWardNo);
+    const hasGroundwaterData = Boolean(row && (Number(row.totalSensors || 0) > 0 || Number(row.goodSensors || 0) > 0));
+    const currentAction = row?.groundwaterStatus === "Critical" || row?.groundwaterStatus === "Watch";
+    const goodSensors = Number(row?.goodSensors || 0);
+    const scUidCount = Number(capacity?.uidCount || 0);
+    const qcVsSpecificCapacityNote = !goodSensors && !scUidCount
+      ? "No GOOD groundwater sensors and no valid specific-capacity sessions."
+      : goodSensors && !scUidCount
+        ? "GOOD groundwater sensors are available, but no valid specific-capacity sessions were found; water-level QC and pump-performance calculation are different checks."
+        : !goodSensors && scUidCount
+          ? "Specific-capacity sessions exist, but the ward has no currently plottable GOOD groundwater sensors from QC."
+          : `${scUidCount}/${goodSensors} GOOD/plottable groundwater sensors have valid specific-capacity sessions.`;
+    return [
+      normalizedWardNo,
+      row?.wardName || capacity?.wardName || fallbackName || "",
+      previousCritical ? "Yes" : "No",
+      hasGroundwaterData ? "Yes" : "No",
+      currentAction ? "Yes" : "No",
+      row?.groundwaterStatus || "No sensors",
+      row?.groundwaterDirection || "No sensors available",
+      row?.trendEvidence || "",
+      row?.updateReason || "No sensors available in current dashboard groundwater data.",
+      row?.totalSensors || 0,
+      goodSensors,
+      row?.classifiedSensorCount || 0,
+      row?.confirmedDecliningSensorCount || 0,
+      roundNumber(row?.medianSensorTheilSenSlopeFtPerWeek, 4),
+      roundNumber(row?.linearSlopeFtPerWeek, 4),
+      roundNumber(row?.mannKendallPValue, 4),
+      scUidCount,
+      capacity?.validSessions || 0,
+      capacityCategory(capacity),
+      roundNumber(Number(capacity?.averageSpecificCapacityM2s) * TRANSMISSIVITY_SCALE, 4),
+      roundNumber(Number(capacity?.maxSpecificCapacityM2s) * TRANSMISSIVITY_SCALE, 4),
+      roundNumber(capacity?.averageInverseSpecificCapacitySPerM2, 0),
+      roundNumber(capacity?.maxInverseSpecificCapacitySPerM2, 0),
+      capacityReason(capacity),
+      qcVsSpecificCapacityNote,
+      row?.uidList || capacity?.uidList || ""
+    ];
+  };
+
+  const previousRows = Array.from(previousCriticalMap.entries())
+    .sort(([a], [b]) => Number(a) - Number(b))
+    .map(([wardNo, wardName]) => makeRow(wardNo, wardName, true));
+  const actionRows = currentActionRows
+    .sort((a, b) => Number(a.topDeclineRank || 9999) - Number(b.topDeclineRank || 9999))
+    .map(row => makeRow(row.wardNo, row.wardName, previousCriticalSet.has(normalizeWardNoValue(row.wardNo))));
+  const previousWithGroundwaterData = previousRows.filter(row => row[3] === "Yes").length;
+  const previousCurrentAction = previousRows.filter(row => row[4] === "Yes").length;
+  const currentActionFromPrevious = actionRows.filter(row => row[2] === "Yes").length;
+  const currentActionNew = actionRows.filter(row => row[2] !== "Yes").length;
+  const previousNoData = previousRows.filter(row => row[3] !== "Yes").length;
+  const previousNoLongerCritical = previousRows.filter(row => row[3] === "Yes" && row[4] !== "Yes").length;
+  const sheets = [
+    {
+      name: "Summary",
+      headers: ["Metric", "Value"],
+      rows: [
+        ["Previous BWSSB consumption-critical wards", PREVIOUS_CRITICAL_WARDS.length],
+        ["Previous wards with current groundwater sensor data", previousWithGroundwaterData],
+        ["Previous wards still current groundwater action wards", previousCurrentAction],
+        ["Previous wards with data but not current groundwater action", previousNoLongerCritical],
+        ["Previous wards with no current groundwater data", previousNoData],
+        ["Current groundwater action wards (Critical + Watch)", currentActionRows.length],
+        ["Current action wards also in previous 60", currentActionFromPrevious],
+        ["Current action wards newly added by groundwater evidence", currentActionNew],
+        ["Confirmed Critical wards only", rows.filter(row => row.groundwaterStatus === "Critical").length],
+        ["Watch wards included as critical/action as requested", rows.filter(row => row.groundwaterStatus === "Watch").length],
+        ["Specific-capacity low-performance cutoff", Number.isFinite(lowCapacityCutoff) ? `${roundNumber(lowCapacityCutoff * TRANSMISSIVITY_SCALE, 4)} x10^-6 m2/s` : "Not available"],
+        ["Specific-capacity high-performance cutoff", Number.isFinite(highCapacityCutoff) ? `${roundNumber(highCapacityCutoff * TRANSMISSIVITY_SCALE, 4)} x10^-6 m2/s` : "Not available"]
+      ]
+    },
+    {
+      name: "Previous 60 Comparison",
+      headers,
+      rows: previousRows
+    },
+    {
+      name: "Current Action Wards",
+      headers,
+      rows: actionRows
+    },
+    {
+      name: "Method",
+      headers: ["Item", "Explanation"],
+      rows: [
+        ["Previous method", "The old 60 wards were consumption-critical wards shared earlier with BWSSB."],
+        ["Current groundwater method", "Current action wards include both confirmed Critical and Watch wards from cleaned weekly groundwater depth trends."],
+        ["Why Watch is included", "Watch wards have decline evidence but do not meet every strict confirmation rule; per request, these are also treated as current critical/action wards in the dashboard."],
+        ["Groundwater interpretation", "Positive slope means water level below ground surface is increasing, so groundwater is getting deeper."],
+        ["QC versus specific capacity", "GOOD QC means the water-level sensor series is usable. Specific capacity needs valid pumping sessions with water-level drawdown and discharge, so a GOOD sensor may still have no specific-capacity value."],
+        ["Specific capacity classification", "Specific-capacity performance is classified using ward percentiles among wards with valid sessions: bottom third Low, middle third Medium, top third High."],
+        ["Safer wording", "Specific capacity is treated as a pump-performance/proxy transmissivity indicator, not actual aquifer transmissivity."]
+      ]
+    }
+  ];
+  return multiSheetExcelResponse(sheets, "previous_60_vs_current_groundwater_specific_capacity.xlsx");
 }
 
 const CRC32_TABLE = new Uint32Array(256).map((_, index) => {
@@ -4040,9 +4295,15 @@ export default {
           minimumWeeklyValues: CRITICAL_GW_MIN_WEEKS,
           minimumWeeklyComparisons: CRITICAL_GW_MIN_COMPARISONS,
           criticalCount: rows.filter(row => row.groundwaterStatus === "Critical").length,
+          actionCount: rows.filter(row => row.groundwaterStatus === "Critical" || row.groundwaterStatus === "Watch").length,
+          watchCount: rows.filter(row => row.groundwaterStatus === "Watch").length,
           previousCriticalCount: PREVIOUS_CRITICAL_WARDS.length,
           wards: rows
         });
+      }
+
+      if (url.pathname === "/api/critical-wards-comparison.xlsx") {
+        return await criticalWardComparisonExcelResponse(sql);
       }
 
       if (url.pathname === "/api/ward-weekly-levels") {
