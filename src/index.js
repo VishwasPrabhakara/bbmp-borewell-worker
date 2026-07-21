@@ -921,6 +921,15 @@ function criticalGroundwaterRows(payload, options = {}) {
       : null;
     const methods = trendMethods(points, comparisons);
     const wardTrend = combinedGroundwaterStatus(methods, hasEnough);
+    const linearMethodCritical = hasEnough
+      && Number(methods.linearSlopeFtPerWeek) > CRITICAL_GW_DECLINE_FT_PER_WEEK;
+    const mannKendallMethodCritical = hasEnough
+      && Number(methods.mannKendallS) > 0
+      && Number(methods.mannKendallPValue) <= TREND_SIGNIFICANCE_ALPHA;
+    const theilSenMethodCritical = hasEnough
+      && Number(methods.senSlopeFtPerWeek) > CRITICAL_GW_DECLINE_FT_PER_WEEK;
+    const linearMannKendallCritical = linearMethodCritical && mannKendallMethodCritical;
+    const theilSenMannKendallCritical = theilSenMethodCritical && mannKendallMethodCritical;
     const sensorSummary = ward.trendSensorSummary || {};
     const classifiedSensorCount = Number(sensorSummary.classifiedSensorCount || 0);
     const decliningSensorCount = Number(sensorSummary.decliningSensorCount || 0);
@@ -934,6 +943,7 @@ function criticalGroundwaterRows(payload, options = {}) {
     const groundwaterCritical = hasSensorAgreement;
     const groundwaterWatch = !groundwaterCritical
       && (wardTrend.status === "Critical" || wardTrend.status === "Watch" || hasSensorAgreement);
+    const dashboardAction = groundwaterCritical || groundwaterWatch;
     const direction = groundwaterCritical
       ? "Declining"
       : groundwaterWatch
@@ -957,6 +967,18 @@ function criticalGroundwaterRows(payload, options = {}) {
       previousCriticalWard: previousCritical ? "Yes" : "No",
       previousCriticalWardName: critical.get(wardNo) || "",
       groundwaterStatus: groundwaterCritical ? "Critical" : groundwaterWatch ? "Watch" : "Normal",
+      dashboardAction: dashboardAction ? "Yes" : "No",
+      linearMethodCritical: linearMethodCritical ? "Yes" : "No",
+      mannKendallMethodCritical: mannKendallMethodCritical ? "Yes" : "No",
+      theilSenMethodCritical: theilSenMethodCritical ? "Yes" : "No",
+      linearMannKendallCritical: linearMannKendallCritical ? "Yes" : "No",
+      theilSenMannKendallCritical: theilSenMannKendallCritical ? "Yes" : "No",
+      oldConsumptionNoGroundwaterData: "No",
+      dashboardMapCategory: dashboardAction
+        ? "Robust groundwater action"
+        : linearMannKendallCritical
+          ? "Linear + Mann-Kendall screening"
+          : "Not current groundwater action",
       groundwaterDirection: direction,
       computed: hasEnough ? "Yes" : "No",
       totalSensors: ward.totalSensors || 0,
@@ -1027,6 +1049,14 @@ function criticalGroundwaterRows(payload, options = {}) {
         previousCriticalWard: "Yes",
         previousCriticalWardName: wardName,
         groundwaterStatus: "Normal",
+        dashboardAction: "No",
+        linearMethodCritical: "No",
+        mannKendallMethodCritical: "No",
+        theilSenMethodCritical: "No",
+        linearMannKendallCritical: "No",
+        theilSenMannKendallCritical: "No",
+        oldConsumptionNoGroundwaterData: "Yes",
+        dashboardMapCategory: "Old consumption-critical, no groundwater data",
         groundwaterDirection: "No sensors available",
         computed: "No",
         totalSensors: 0,
@@ -1233,6 +1263,14 @@ function criticalGroundwaterExcelResponse(payload, filename = "critical_wards_gr
     "previousCriticalWard",
     "previousCriticalWardName",
     "groundwaterStatus",
+    "dashboardAction",
+    "dashboardMapCategory",
+    "linearMethodCritical",
+    "mannKendallMethodCritical",
+    "theilSenMethodCritical",
+    "linearMannKendallCritical",
+    "theilSenMannKendallCritical",
+    "oldConsumptionNoGroundwaterData",
     "groundwaterDirection",
     "computed",
     "totalSensors",
@@ -1325,6 +1363,25 @@ async function criticalWardComparisonExcelResponse(sql) {
   const rowsByWardNo = new Map(rows.map(row => [normalizeWardNoValue(row.wardNo), row]));
   const previousCriticalMap = criticalWardMap();
   const currentActionRows = rows.filter(row => row.groundwaterStatus === "Critical" || row.groundwaterStatus === "Watch");
+  const methodRows = [
+    ["Linear slope only", row => row.linearMethodCritical === "Yes"],
+    ["Mann-Kendall only", row => row.mannKendallMethodCritical === "Yes"],
+    ["Theil-Sen only", row => row.theilSenMethodCritical === "Yes"],
+    ["Linear slope + Mann-Kendall", row => row.linearMannKendallCritical === "Yes"],
+    ["Theil-Sen + Mann-Kendall", row => row.theilSenMannKendallCritical === "Yes"],
+    ["Dashboard action logic", row => row.dashboardAction === "Yes"]
+  ].map(([method, predicate]) => {
+    const flagged = rows.filter(predicate);
+    const oldMatches = flagged.filter(row => row.previousCriticalWard === "Yes");
+    return [
+      method,
+      flagged.length,
+      oldMatches.length,
+      flagged.length - oldMatches.length,
+      roundNumber((oldMatches.length / PREVIOUS_CRITICAL_WARDS.length) * 100, 1),
+      flagged.length + rows.filter(row => row.oldConsumptionNoGroundwaterData === "Yes").length
+    ];
+  });
   const currentActionSet = new Set(currentActionRows.map(row => normalizeWardNoValue(row.wardNo)));
   const previousCriticalSet = new Set(Array.from(previousCriticalMap.keys()));
   const capacityValues = Array.from(capacityByWardNo.values())
@@ -1356,6 +1413,13 @@ async function criticalWardComparisonExcelResponse(sql) {
     "previousConsumptionCritical",
     "hasDashboardGroundwaterData",
     "currentGroundwaterAction",
+    "dashboardMapCategory",
+    "linearMethodCritical",
+    "mannKendallMethodCritical",
+    "theilSenMethodCritical",
+    "linearMannKendallCritical",
+    "theilSenMannKendallCritical",
+    "oldConsumptionNoGroundwaterData",
     "groundwaterStatus",
     "groundwaterDirection",
     "groundwaterEvidence",
@@ -1399,6 +1463,13 @@ async function criticalWardComparisonExcelResponse(sql) {
       previousCritical ? "Yes" : "No",
       hasGroundwaterData ? "Yes" : "No",
       currentAction ? "Yes" : "No",
+      row?.dashboardMapCategory || (row?.oldConsumptionNoGroundwaterData === "Yes" ? "Old consumption-critical, no groundwater data" : ""),
+      row?.linearMethodCritical || "No",
+      row?.mannKendallMethodCritical || "No",
+      row?.theilSenMethodCritical || "No",
+      row?.linearMannKendallCritical || "No",
+      row?.theilSenMannKendallCritical || "No",
+      row?.oldConsumptionNoGroundwaterData || "No",
       row?.groundwaterStatus || "No sensors",
       row?.groundwaterDirection || "No sensors available",
       row?.trendEvidence || "",
@@ -1453,6 +1524,18 @@ async function criticalWardComparisonExcelResponse(sql) {
         ["Specific-capacity low-performance cutoff", Number.isFinite(lowCapacityCutoff) ? `${roundNumber(lowCapacityCutoff * TRANSMISSIVITY_SCALE, 4)} x10^-6 m2/s` : "Not available"],
         ["Specific-capacity high-performance cutoff", Number.isFinite(highCapacityCutoff) ? `${roundNumber(highCapacityCutoff * TRANSMISSIVITY_SCALE, 4)} x10^-6 m2/s` : "Not available"]
       ]
+    },
+    {
+      name: "Method Match Summary",
+      headers: [
+        "Method",
+        "Total flagged wards",
+        "Matches in old 60",
+        "New wards outside old 60",
+        "Old 60 match percent",
+        "Flagged plus old no-data priority"
+      ],
+      rows: methodRows
     },
     {
       name: "Previous 60 Comparison",
@@ -4288,6 +4371,15 @@ export default {
           includeWeeklyColumns: false,
           includePairRows: false
         });
+        const methodCounts = {
+          linearOnly: rows.filter(row => row.linearMethodCritical === "Yes").length,
+          mannKendallOnly: rows.filter(row => row.mannKendallMethodCritical === "Yes").length,
+          theilSenOnly: rows.filter(row => row.theilSenMethodCritical === "Yes").length,
+          linearAndMannKendall: rows.filter(row => row.linearMannKendallCritical === "Yes").length,
+          theilSenAndMannKendall: rows.filter(row => row.theilSenMannKendallCritical === "Yes").length,
+          dashboardAction: rows.filter(row => row.dashboardAction === "Yes").length,
+          oldConsumptionNoGroundwaterData: rows.filter(row => row.oldConsumptionNoGroundwaterData === "Yes").length
+        };
         return cachedJson(request, {
           generatedAt: generatedAt.toISOString(),
           nextRecommendedUpdate: nextRecommendedUpdate.toISOString(),
@@ -4298,6 +4390,7 @@ export default {
           actionCount: rows.filter(row => row.groundwaterStatus === "Critical" || row.groundwaterStatus === "Watch").length,
           watchCount: rows.filter(row => row.groundwaterStatus === "Watch").length,
           previousCriticalCount: PREVIOUS_CRITICAL_WARDS.length,
+          methodCounts,
           wards: rows
         });
       }
