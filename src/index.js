@@ -992,7 +992,7 @@ function criticalGroundwaterRows(payload, options = {}) {
 
     const direction = wardTrend.direction;
     const supportingSensorText = classifiedSensorCount > 0
-  ? `${confirmedDecliningSensorCount}/${classifiedSensorCount} classifiable borewells show confirmed decline, ${decliningSensorCount}/${classifiedSensorCount} show confirmed or possible decline, and ${improvingSensorCount}/${classifiedSensorCount} show improvement.`
+  ? `${confirmedDecliningSensorCount}/${classifiedSensorCount} classifiable borewells show confirmed decline, ${decliningSensorCount}/${classifiedSensorCount} show decline-support evidence, and ${improvingSensorCount}/${classifiedSensorCount} show improvement.`
   : "No individual borewells had enough data for separate trend classification.";
 
     const reason = !ward.goodSensors
@@ -1008,7 +1008,7 @@ function criticalGroundwaterRows(payload, options = {}) {
         ? `Critical groundwater decline: the cleaned ward-average weekly graph has a linear slope of ${roundNumber(methods.linearSlopeFtPerWeek, 2)} ft/week and a statistically significant increasing-depth Mann-Kendall trend (p=${roundNumber(methods.mannKendallPValue, 4)}). Theil-Sen slope is reported separately as a robustness check (${roundNumber(methods.senSlopeFtPerWeek, 2)} ft/week), but it does not decide the map colour. ${supportingSensorText}`
 
       : groundwaterWatch
-        ? `Watch ward: the ward-average graph is not confirmed critical, but either the ward-average linear trend shows a possible decline or at least one classifiable borewell inside the ward shows confirmed decline. ${supportingSensorText}`
+        ? `Groundwater decline review: the ward-average graph is not confirmed critical, but either the ward-average linear trend shows a decline signal or at least one classifiable borewell inside the ward shows confirmed decline. ${supportingSensorText}`
 
       : wardTrend.direction === "Improving"
         ? `Groundwater rise: the cleaned ward-average weekly graph has a negative linear slope of ${roundNumber(methods.linearSlopeFtPerWeek, 2)} ft/week and a statistically significant decreasing-depth Mann-Kendall trend (p=${roundNumber(methods.mannKendallPValue, 4)}). ${supportingSensorText}`
@@ -1043,7 +1043,7 @@ function criticalGroundwaterRows(payload, options = {}) {
         groundwaterCritical
           ? "Critical: Ward-average groundwater decline"
           : groundwaterWatch
-            ? "Warning: Possible ward-average decline"
+            ? "Groundwater decline review"
             : wardTrend.direction === "Improving"
               ? "Confirmed groundwater rise"
               : wardTrend.direction === "Possible improvement"
