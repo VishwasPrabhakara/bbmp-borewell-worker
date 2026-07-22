@@ -931,42 +931,105 @@ function criticalGroundwaterRows(payload, options = {}) {
     const linearMannKendallCritical = linearMethodCritical && mannKendallMethodCritical;
     const theilSenMannKendallCritical = theilSenMethodCritical && mannKendallMethodCritical;
     const sensorSummary = ward.trendSensorSummary || {};
-    const classifiedSensorCount = Number(sensorSummary.classifiedSensorCount || 0);
-    const decliningSensorCount = Number(sensorSummary.decliningSensorCount || 0);
-    const confirmedDecliningSensorCount = Number(sensorSummary.confirmedDecliningSensorCount || 0);
-    const medianSensorSlope = Number(sensorSummary.medianTheilSenSlopeFtPerWeek);
-    const decliningSensorFraction = classifiedSensorCount ? confirmedDecliningSensorCount / classifiedSensorCount : 0;
-    const hasSensorAgreement = classifiedSensorCount >= WARD_MIN_CLASSIFIED_SENSORS
-      && decliningSensorFraction >= WARD_DECLINING_SENSOR_FRACTION
-      && Number.isFinite(medianSensorSlope)
-      && medianSensorSlope > CRITICAL_GW_DECLINE_FT_PER_WEEK;
-    const groundwaterCritical = hasSensorAgreement;
-    const groundwaterWatch = !groundwaterCritical
-      && (wardTrend.status === "Critical" || wardTrend.status === "Watch" || hasSensorAgreement);
-    const dashboardAction = groundwaterCritical || groundwaterWatch;
-    const direction = groundwaterCritical
-      ? "Declining"
-      : groundwaterWatch
-        ? "Needs review"
-        : wardTrend.direction;
+
+    const classifiedSensorCount = Number(
+      sensorSummary.classifiedSensorCount || 0
+    );
+
+    const decliningSensorCount = Number(
+      sensorSummary.decliningSensorCount || 0
+    );
+
+    const confirmedDecliningSensorCount = Number(
+      sensorSummary.confirmedDecliningSensorCount || 0
+    );
+
+    const improvingSensorCount = Number(
+      sensorSummary.improvingSensorCount || 0
+    );
+
+    const medianSensorSlopeRaw =
+      sensorSummary.medianTheilSenSlopeFtPerWeek;
+
+    const medianSensorSlope =
+      medianSensorSlopeRaw !== null &&
+      medianSensorSlopeRaw !== undefined &&
+      Number.isFinite(Number(medianSensorSlopeRaw))
+        ? Number(medianSensorSlopeRaw)
+        : null;
+
+    const decliningSensorFraction =
+      classifiedSensorCount > 0
+        ? confirmedDecliningSensorCount / classifiedSensorCount
+        : 0;
+
+    /*
+    * Individual-borewell agreement is retained as supporting evidence.
+    * It no longer controls the map classification.
+    */
+    const hasSensorAgreement =
+      classifiedSensorCount >= WARD_MIN_CLASSIFIED_SENSORS &&
+      decliningSensorFraction >= WARD_DECLINING_SENSOR_FRACTION &&
+      medianSensorSlope !== null &&
+      medianSensorSlope > CRITICAL_GW_DECLINE_FT_PER_WEEK;
+
+    /*
+    * Primary ward classification:
+    * Uses only the cleaned ward-average weekly groundwater trend.
+    */
+    const groundwaterCritical =
+      hasEnough &&
+      wardTrend.status === "Critical";
+
+    const groundwaterWatch =
+      hasEnough &&
+      wardTrend.status === "Watch";
+
+    const dashboardAction =
+      groundwaterCritical || groundwaterWatch;
+
+    const direction = wardTrend.direction;
+    const supportingSensorText = classifiedSensorCount > 0
+  ? `${confirmedDecliningSensorCount}/${classifiedSensorCount} classifiable borewells show confirmed decline, ${decliningSensorCount}/${classifiedSensorCount} show confirmed or possible decline, and ${improvingSensorCount}/${classifiedSensorCount} show improvement.`
+  : "No individual borewells had enough data for separate trend classification.";
+
     const reason = !ward.goodSensors
       ? "No GOOD sensors with cleaned weekly groundwater levels are available."
+
       : points.length < CRITICAL_GW_MIN_WEEKS
-        ? `Not computed because only ${points.length} cleaned weekly ward values are available; minimum required is ${CRITICAL_GW_MIN_WEEKS}.`
-        : comparisons.length < CRITICAL_GW_MIN_COMPARISONS
-          ? `Not computed because only ${comparisons.length} valid week-to-week comparisons remain after gap/jump cleaning; minimum required is ${CRITICAL_GW_MIN_COMPARISONS}.`
-          : groundwaterCritical
-            ? `Critical: the median borewell Theil-Sen slope is ${roundNumber(medianSensorSlope, 2)} ft/week and ${confirmedDecliningSensorCount}/${classifiedSensorCount} classifiable borewells independently show significant decline (Mann-Kendall p <= ${TREND_SIGNIFICANCE_ALPHA}).`
-            : groundwaterWatch
-              ? `Watch: some decline evidence exists, but the ward does not yet satisfy both a significant ward trend and at least ${Math.round(WARD_DECLINING_SENSOR_FRACTION * 100)}% declining borewells from a minimum of ${WARD_MIN_CLASSIFIED_SENSORS} classified sensors.`
-              : "Normal/stable: the cleaned observations do not provide statistically significant, borewell-supported evidence of groundwater decline.";
+        ? `Not computed because only ${points.length} cleaned weekly ward-average values are available; minimum required is ${CRITICAL_GW_MIN_WEEKS}.`
+
+      : comparisons.length < CRITICAL_GW_MIN_COMPARISONS
+        ? `Not computed because only ${comparisons.length} valid ward-average week-to-week comparisons remain after gap and jump cleaning; minimum required is ${CRITICAL_GW_MIN_COMPARISONS}.`
+
+      : groundwaterCritical
+        ? `Critical groundwater decline: the cleaned ward-average weekly series has a Theil-Sen slope of ${roundNumber(methods.senSlopeFtPerWeek, 2)} ft/week, a linear slope of ${roundNumber(methods.linearSlopeFtPerWeek, 2)} ft/week, and a statistically significant increasing-depth Mann-Kendall trend (p=${roundNumber(methods.mannKendallPValue, 4)}). ${supportingSensorText}`
+
+      : groundwaterWatch
+        ? `Possible groundwater decline: the cleaned ward-average weekly series has a positive Theil-Sen slope of ${roundNumber(methods.senSlopeFtPerWeek, 2)} ft/week and increasing-depth direction, but the Mann-Kendall trend is not statistically significant at p <= ${TREND_SIGNIFICANCE_ALPHA}. ${supportingSensorText}`
+
+      : wardTrend.direction === "Improving"
+        ? `Groundwater rise: the cleaned ward-average weekly series has a Theil-Sen slope of ${roundNumber(methods.senSlopeFtPerWeek, 2)} ft/week and a statistically significant decreasing-depth trend (p=${roundNumber(methods.mannKendallPValue, 4)}). ${supportingSensorText}`
+
+      : wardTrend.direction === "Possible improvement"
+        ? `Possible groundwater rise: the cleaned ward-average weekly series has a negative Theil-Sen slope of ${roundNumber(methods.senSlopeFtPerWeek, 2)} ft/week, but the trend is not statistically significant at p <= ${TREND_SIGNIFICANCE_ALPHA}. ${supportingSensorText}`
+
+      : `Stable or mixed groundwater trend: the cleaned ward-average observations do not show a consistent groundwater decline or rise. ${supportingSensorText}`;
 
     const row = {
       wardNo,
       wardName: ward.wardName || critical.get(wardNo) || "",
       previousCriticalWard: previousCritical ? "Yes" : "No",
       previousCriticalWardName: critical.get(wardNo) || "",
-      groundwaterStatus: groundwaterCritical ? "Critical" : groundwaterWatch ? "Watch" : "Normal",
+      groundwaterStatus:
+        groundwaterCritical
+          ? "Critical"
+          : groundwaterWatch
+            ? "Watch"
+            : wardTrend.evidence === "insufficient"
+              ? "Insufficient data"
+              : "Normal",
+
       dashboardAction: dashboardAction ? "Yes" : "No",
       linearMethodCritical: linearMethodCritical ? "Yes" : "No",
       mannKendallMethodCritical: mannKendallMethodCritical ? "Yes" : "No",
@@ -974,11 +1037,18 @@ function criticalGroundwaterRows(payload, options = {}) {
       linearMannKendallCritical: linearMannKendallCritical ? "Yes" : "No",
       theilSenMannKendallCritical: theilSenMannKendallCritical ? "Yes" : "No",
       oldConsumptionNoGroundwaterData: "No",
-      dashboardMapCategory: dashboardAction
-        ? "Robust groundwater action"
-        : linearMannKendallCritical
-          ? "Linear + Mann-Kendall screening"
-          : "Not current groundwater action",
+      dashboardMapCategory:
+        groundwaterCritical
+          ? "Critical: Ward-average groundwater decline"
+          : groundwaterWatch
+            ? "Warning: Possible ward-average decline"
+            : wardTrend.direction === "Improving"
+              ? "Confirmed groundwater rise"
+              : wardTrend.direction === "Possible improvement"
+                ? "Possible groundwater rise"
+                : wardTrend.evidence === "insufficient"
+                  ? "Insufficient groundwater data"
+                  : "Stable / mixed groundwater trend",
       groundwaterDirection: direction,
       computed: hasEnough ? "Yes" : "No",
       totalSensors: ward.totalSensors || 0,
@@ -993,11 +1063,11 @@ function criticalGroundwaterRows(payload, options = {}) {
       classifiedSensorCount,
       decliningSensorCount,
       confirmedDecliningSensorCount,
-      improvingSensorCount: Number(sensorSummary.improvingSensorCount || 0),
+      improvingSensorCount,
       decliningSensorPercent: Number.isFinite(Number(sensorSummary.decliningSensorPercent)) ? Number(sensorSummary.decliningSensorPercent) : null,
       confirmedDecliningSensorPercent: Number.isFinite(Number(sensorSummary.confirmedDecliningSensorPercent)) ? Number(sensorSummary.confirmedDecliningSensorPercent) : null,
       medianSensorTheilSenSlopeFtPerWeek: Number.isFinite(medianSensorSlope) ? medianSensorSlope : null,
-      declineStrengthFtPerWeek: Number.isFinite(medianSensorSlope) ? medianSensorSlope : methods.senSlopeFtPerWeek,
+      declineStrengthFtPerWeek: methods.senSlopeFtPerWeek,
       topDeclineRank: null,
       linearSlopeFtPerWeek: methods.linearSlopeFtPerWeek,
       linearSlopeFtPerDay: methods.linearSlopeFtPerDay,
@@ -1345,8 +1415,18 @@ function criticalGroundwaterExcelResponse(payload, filename = "critical_wards_gr
         ["Theil-Sen slope", "Primary rate estimate: the median of pairwise weekly slopes, which is resistant to isolated abnormal readings."],
         ["Mann-Kendall", `Tests whether the monotonic trend is statistically credible. A confirmed trend requires p <= ${TREND_SIGNIFICANCE_ALPHA}.`],
         ["Borewell classification", "Each UID is classified independently as declining, improving, mostly stable, possible trend, or insufficient data using Theil-Sen magnitude and Mann-Kendall significance."],
-        ["Red dashboard color", `A ward is Critical only when its median borewell Theil-Sen rate exceeds ${CRITICAL_GW_DECLINE_FT_PER_WEEK} ft/week and at least ${Math.round(WARD_DECLINING_SENSOR_FRACTION * 100)}% of at least ${WARD_MIN_CLASSIFIED_SENSORS} classifiable borewells independently show significant decline.`],
-        ["Watch classification", "A ward is Watch when decline evidence is present but does not satisfy every Critical requirement. There is no arbitrary top-60 cutoff."]
+        [
+          "Red dashboard color",
+          `A ward is Critical when the cleaned ward-average weekly groundwater series has a Theil-Sen slope greater than ${CRITICAL_GW_DECLINE_FT_PER_WEEK} ft/week, an increasing-depth Mann-Kendall direction, and Mann-Kendall p-value <= ${TREND_SIGNIFICANCE_ALPHA}. Positive depth slope means groundwater is becoming deeper.`
+        ],
+        [
+          "Watch classification",
+          `A ward is Watch when its cleaned ward-average weekly series has a Theil-Sen slope greater than ${CRITICAL_GW_DECLINE_FT_PER_WEEK} ft/week and an increasing-depth Mann-Kendall direction, but the p-value is greater than ${TREND_SIGNIFICANCE_ALPHA}. There is no arbitrary top-60 cutoff.`
+        ],
+        [
+          "Individual borewell evidence",
+          "UID-level classifications are retained as supporting information. They report localized decline or improvement but do not override the ward-average groundwater classification."
+        ]
       ]
     }
   ];
