@@ -749,10 +749,11 @@ function isUsableCriticalLevel(value) {
     && Number(value) > 0;
 }
 
-function validCriticalComparisons(weekly, weeks) {
+function validCriticalComparisons(weekly, weeks, options = {}) {
+  const keepBlankAsZero = Boolean(options.keepBlankAsZero);
   const positions = weekIndexMap(weeks);
   const points = (weekly || [])
-    .filter(point => isUsableCriticalLevel(point.averageLevel))
+    .filter(point => keepBlankAsZero ? Number.isFinite(Number(point.averageLevel)) : isUsableCriticalLevel(point.averageLevel))
     .map(point => ({
       label: point.label,
       level: Number(point.averageLevel),
@@ -811,10 +812,20 @@ function normalCdf(value) {
   return 0.5 * (1 + sign * erf);
 }
 
-function trendMethods(points, comparisons = []) {
+function trendMethods(points, comparisons = [], options = {}) {
+  const keepZeroLevels = Boolean(options.keepZeroLevels);
+  const compressIndex = Boolean(options.compressIndex);
   const usablePoints = (points || [])
-    .filter(point => isUsableCriticalLevel(point.level) && Number.isFinite(Number(point.index)))
-    .sort((a, b) => a.index - b.index);
+    .filter(point => (
+      keepZeroLevels
+        ? Number.isFinite(Number(point.level))
+        : isUsableCriticalLevel(point.level)
+    ) && Number.isFinite(Number(point.index)))
+    .sort((a, b) => a.index - b.index)
+    .map((point, index) => ({
+      ...point,
+      fitIndex: compressIndex ? index : point.index
+    }));
   const n = usablePoints.length;
   if (n < 2) {
     return {
@@ -830,17 +841,17 @@ function trendMethods(points, comparisons = []) {
     };
   }
 
-  const meanX = usablePoints.reduce((sum, point) => sum + point.index, 0) / n;
+  const meanX = usablePoints.reduce((sum, point) => sum + point.fitIndex, 0) / n;
   const meanY = usablePoints.reduce((sum, point) => sum + point.level, 0) / n;
-  const denominator = usablePoints.reduce((sum, point) => sum + ((point.index - meanX) ** 2), 0);
+  const denominator = usablePoints.reduce((sum, point) => sum + ((point.fitIndex - meanX) ** 2), 0);
   const linearSlope = denominator
-    ? usablePoints.reduce((sum, point) => sum + ((point.index - meanX) * (point.level - meanY)), 0) / denominator
+    ? usablePoints.reduce((sum, point) => sum + ((point.fitIndex - meanX) * (point.level - meanY)), 0) / denominator
     : null;
   const intercept = Number.isFinite(linearSlope) ? meanY - linearSlope * meanX : null;
   const totalSquares = usablePoints.reduce((sum, point) => sum + ((point.level - meanY) ** 2), 0);
   const residualSquares = Number.isFinite(intercept)
     ? usablePoints.reduce((sum, point) => {
-      const expected = intercept + linearSlope * point.index;
+      const expected = intercept + linearSlope * point.fitIndex;
       return sum + ((point.level - expected) ** 2);
     }, 0)
     : null;
@@ -848,7 +859,7 @@ function trendMethods(points, comparisons = []) {
   const pairSlopes = [];
   for (let i = 0; i < usablePoints.length - 1; i += 1) {
     for (let j = i + 1; j < usablePoints.length; j += 1) {
-      const dx = usablePoints[j].index - usablePoints[i].index;
+      const dx = usablePoints[j].fitIndex - usablePoints[i].fitIndex;
       if (dx > 0) pairSlopes.push((usablePoints[j].level - usablePoints[i].level) / dx);
     }
   }
@@ -922,20 +933,31 @@ function criticalGroundwaterRows(payload, options = {}) {
   for (const ward of payload.wards || []) {
     const wardNo = normalizeWardNoValue(ward.wardNo);
     const previousCritical = critical.has(wardNo);
-    const { points, comparisons, skipped } = validCriticalComparisons(ward.weekly, payload.weeks);
+    const cleanResult = validCriticalComparisons(ward.weekly, payload.weeks);
+    const legacyResult = validCriticalComparisons(ward.weekly, payload.weeks, { keepBlankAsZero: true });
+    const { points, comparisons, skipped } = cleanResult;
+    const legacyPoints = legacyResult.points;
+    const legacyComparisons = legacyResult.comparisons;
     const hasEnough = points.length >= CRITICAL_GW_MIN_WEEKS && comparisons.length >= CRITICAL_GW_MIN_COMPARISONS;
+    const legacyHasEnough = legacyPoints.length >= CRITICAL_GW_MIN_WEEKS && legacyComparisons.length >= CRITICAL_GW_MIN_COMPARISONS;
     const averageChange = hasEnough
       ? comparisons.reduce((sum, item) => sum + item.changeFtPerWeek, 0) / comparisons.length
       : null;
-    const methods = trendMethods(points, comparisons);
+    const methods = trendMethods(points, comparisons, { compressIndex: true });
+    const legacyMethods = trendMethods(legacyPoints, legacyComparisons, { keepZeroLevels: true });
     const wardTrend = combinedGroundwaterStatus(methods, hasEnough);
-    const linearMethodCritical = hasEnough
-      && Number(methods.linearSlopeFtPerWeek) > CRITICAL_GW_DECLINE_FT_PER_WEEK;
-    const mannKendallMethodCritical = hasEnough
-      && Number(methods.mannKendallS) > 0
-      && Number(methods.mannKendallPValue) <= TREND_SIGNIFICANCE_ALPHA;
-    const theilSenMethodCritical = hasEnough
-      && Number(methods.senSlopeFtPerWeek) > CRITICAL_GW_DECLINE_FT_PER_WEEK;
+    const cleanRiseOverride =
+      wardTrend.direction === "Improving"
+      || wardTrend.direction === "Possible improvement"
+      || Number(methods.linearSlopeFtPerWeek) < -CRITICAL_GW_DECLINE_FT_PER_WEEK
+      || Number(methods.senSlopeFtPerWeek) < -CRITICAL_GW_DECLINE_FT_PER_WEEK;
+    const linearMethodCritical = legacyHasEnough
+      && Number(legacyMethods.linearSlopeFtPerWeek) > CRITICAL_GW_DECLINE_FT_PER_WEEK;
+    const mannKendallMethodCritical = legacyHasEnough
+      && Number(legacyMethods.mannKendallS) > 0
+      && Number(legacyMethods.mannKendallPValue) <= TREND_SIGNIFICANCE_ALPHA;
+    const theilSenMethodCritical = legacyHasEnough
+      && Number(legacyMethods.senSlopeFtPerWeek) > CRITICAL_GW_DECLINE_FT_PER_WEEK;
     const linearMannKendallCritical = linearMethodCritical && mannKendallMethodCritical;
     const theilSenMannKendallCritical = theilSenMethodCritical && mannKendallMethodCritical;
     const sensorSummary = ward.trendSensorSummary || {};
@@ -985,10 +1007,11 @@ function criticalGroundwaterRows(payload, options = {}) {
     * Primary ward classification:
     * Uses only the cleaned ward-average weekly groundwater trend.
     */
-    const groundwaterCritical = linearMannKendallCritical;
+    const groundwaterCritical = linearMannKendallCritical && !cleanRiseOverride;
 
     const groundwaterWatch =
       hasEnough &&
+      !cleanRiseOverride &&
       !groundwaterCritical &&
       (
         wardTrend.status === "Watch" ||
@@ -1046,6 +1069,7 @@ function criticalGroundwaterRows(payload, options = {}) {
       theilSenMethodCritical: theilSenMethodCritical ? "Yes" : "No",
       linearMannKendallCritical: linearMannKendallCritical ? "Yes" : "No",
       theilSenMannKendallCritical: theilSenMannKendallCritical ? "Yes" : "No",
+      groundwaterRiseOverride: cleanRiseOverride ? "Yes" : "No",
       oldConsumptionNoGroundwaterData: "No",
       dashboardMapCategory:
         groundwaterCritical
