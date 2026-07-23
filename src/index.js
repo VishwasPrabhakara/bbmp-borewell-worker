@@ -741,10 +741,18 @@ function weekIndexMap(weeks) {
   return new Map((weeks || []).map((label, index) => [label, index]));
 }
 
+function isUsableCriticalLevel(value) {
+  return value !== null
+    && value !== undefined
+    && value !== ""
+    && Number.isFinite(Number(value))
+    && Number(value) > 0;
+}
+
 function validCriticalComparisons(weekly, weeks) {
   const positions = weekIndexMap(weeks);
   const points = (weekly || [])
-    .filter(point => Number.isFinite(Number(point.averageLevel)))
+    .filter(point => isUsableCriticalLevel(point.averageLevel))
     .map(point => ({
       label: point.label,
       level: Number(point.averageLevel),
@@ -805,7 +813,7 @@ function normalCdf(value) {
 
 function trendMethods(points, comparisons = []) {
   const usablePoints = (points || [])
-    .filter(point => Number.isFinite(Number(point.level)) && Number.isFinite(Number(point.index)))
+    .filter(point => isUsableCriticalLevel(point.level) && Number.isFinite(Number(point.index)))
     .sort((a, b) => a.index - b.index);
   const n = usablePoints.length;
   if (n < 2) {
