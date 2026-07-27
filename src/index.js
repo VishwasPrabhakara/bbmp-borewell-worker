@@ -3536,7 +3536,10 @@ export default {
           SELECT *
           FROM sensor_qc_summary
           WHERE qc_status <> 'GOOD'
-            AND COALESCE(total_readings, 0) > 0
+            AND (
+              COALESCE(total_readings, 0) > 0
+              OR qc_status <> 'NO_DATA'
+            )
           ORDER BY
             CASE qc_status
               WHEN 'POOR' THEN 1
