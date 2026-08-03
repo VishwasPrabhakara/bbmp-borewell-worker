@@ -2762,6 +2762,12 @@ async function ensureCompactUploadTable(sql) {
   `;
 }
 
+async function ensureSensorMetadataColumns(sql) {
+  await sql`ALTER TABLE sensors ADD COLUMN IF NOT EXISTS motor_hp DOUBLE PRECISION NULL`;
+  await sql`ALTER TABLE sensors ADD COLUMN IF NOT EXISTS borewell_depth DOUBLE PRECISION NULL`;
+  await sql`ALTER TABLE sensors ADD COLUMN IF NOT EXISTS pump_name TEXT NULL`;
+}
+
 async function recalculateSummaries(sql) {
   await ensureUploadedTables(sql);
   await sql`
@@ -3362,6 +3368,7 @@ export default {
         }
 
         await ensureCompactUploadTable(sql);
+        await ensureSensorMetadataColumns(sql);
         const rows = await sql`
           SELECT
             COALESCE(s.uid, uploaded.uid) AS uid,
@@ -3369,6 +3376,9 @@ export default {
             COALESCE(uploaded.lng, s.lng) AS lng,
             s.ward_no,
             s.ward_name,
+            s.motor_hp,
+            s.borewell_depth,
+            s.pump_name,
             CASE
               WHEN uploaded.uid IS NOT NULL AND COALESCE(uploaded.water_readings, 0) > 0 AND COALESCE(uploaded.discharge_readings, 0) > 0 THEN 'both'
               WHEN uploaded.uid IS NOT NULL AND COALESCE(uploaded.water_readings, 0) > 0 THEN 'water'
@@ -3396,6 +3406,9 @@ export default {
             lng: row.lng,
             wardNo: row.ward_no,
             wardName: row.ward_name,
+            motorHp: row.motor_hp,
+            borewellDepth: row.borewell_depth,
+            pumpName: row.pump_name,
             dataCategory: row.data_category || "none",
             hasData: !!row.has_data,
             firstDataAt: row.first_data_at,
