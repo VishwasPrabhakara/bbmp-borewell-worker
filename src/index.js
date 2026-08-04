@@ -25,6 +25,7 @@ const CACHEABLE_GET_PATHS = new Set([
   "/api/population/wards",
   "/api/water-level",
   "/api/specific-capacity/ward",
+  "/api/pumping-performance/wards",
   "/api/pumping-performance/ward"
 ]);
 const PREVIOUS_CRITICAL_WARDS = [
@@ -1353,6 +1354,102 @@ async function specificCapacityWardSummaries(sql) {
     });
   }
   return result;
+}
+
+async function pumpingPerformanceWardSummaries(sql) {
+  const rows = await sql`
+    WITH valid_sessions AS (
+      SELECT
+        b.uid,
+        COALESCE(NULLIF(a.ward_no, ''), NULLIF(s.ward_no, ''), NULLIF(q.ward_no, '')) AS ward_no,
+        COALESCE(NULLIF(a.ward_name, ''), NULLIF(s.ward_name, ''), NULLIF(q.ward_name, '')) AS ward_name,
+        COALESCE(b.avg_discharge_lpm, b.min_discharge_lpm) * b.session_duration_min / 1000.0 AS pumped_volume_m3,
+        (b.min_discharge_lpm * ${LPM_TO_M3_PER_SEC})
+          / ((b.water_level_stop_ft - b.water_level_start_ft) * ${FT_TO_M})
+          * ${TRANSMISSIVITY_SCALE} AS specific_capacity_scaled,
+        (b.water_level_stop_ft - b.water_level_start_ft)
+          / (COALESCE(b.avg_discharge_lpm, b.min_discharge_lpm) * b.session_duration_min / 1000.0)
+          AS drawdown_ft_per_m3
+      FROM uploaded_type_b_sessions b
+      LEFT JOIN sensors s ON s.uid = b.uid
+      LEFT JOIN sensor_qc_summary q ON q.uid = b.uid
+      LEFT JOIN sensor_ward_assignments a ON a.uid = b.uid
+      WHERE b.start_time IS NOT NULL
+        AND b.stop_time IS NOT NULL
+        AND b.session_duration_min > 0
+        AND b.water_level_start_ft IS NOT NULL
+        AND b.water_level_stop_ft > b.water_level_start_ft
+        AND b.min_discharge_lpm > 0
+        AND COALESCE(b.avg_discharge_lpm, b.min_discharge_lpm) > 0
+        AND COALESCE(NULLIF(a.ward_no, ''), NULLIF(s.ward_no, ''), NULLIF(q.ward_no, '')) IS NOT NULL
+    ),
+    uid_performance AS (
+      SELECT
+        uid,
+        ward_no,
+        MAX(ward_name) AS ward_name,
+        COUNT(*)::integer AS sessions,
+        SUM(pumped_volume_m3) AS total_volume_m3,
+        percentile_cont(0.5) WITHIN GROUP (ORDER BY specific_capacity_scaled) AS median_specific_capacity_scaled,
+        percentile_cont(0.5) WITHIN GROUP (ORDER BY drawdown_ft_per_m3) AS median_drawdown_ft_per_m3
+      FROM valid_sessions
+      GROUP BY uid, ward_no
+    ),
+    ward_performance AS (
+      SELECT
+        ward_no,
+        MAX(ward_name) AS ward_name,
+        COUNT(*)::integer AS borewells,
+        SUM(sessions)::integer AS total_sessions,
+        SUM(total_volume_m3) AS total_volume_m3,
+        percentile_cont(0.5) WITHIN GROUP (ORDER BY median_specific_capacity_scaled) AS median_specific_capacity_scaled,
+        percentile_cont(0.5) WITHIN GROUP (ORDER BY median_drawdown_ft_per_m3) AS median_drawdown_ft_per_m3
+      FROM uid_performance
+      GROUP BY ward_no
+    ),
+    thresholds AS (
+      SELECT
+        percentile_cont(0.75) WITHIN GROUP (ORDER BY total_volume_m3) AS extraction_p75,
+        percentile_cont(0.25) WITHIN GROUP (ORDER BY median_specific_capacity_scaled) AS specific_capacity_p25,
+        percentile_cont(0.75) WITHIN GROUP (ORDER BY median_drawdown_ft_per_m3) AS normalized_drawdown_p75
+      FROM ward_performance
+    )
+    SELECT w.*, t.extraction_p75, t.specific_capacity_p25, t.normalized_drawdown_p75
+    FROM ward_performance w
+    CROSS JOIN thresholds t
+    ORDER BY NULLIF(regexp_replace(w.ward_no, '[^0-9.]', '', 'g'), '')::numeric NULLS LAST, w.ward_no
+  `;
+  const number = value => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  const first = rows[0] || {};
+  const thresholds = {
+    extractionP75M3: number(first.extraction_p75),
+    specificCapacityP25Scaled: number(first.specific_capacity_p25),
+    normalizedDrawdownP75FtPerM3: number(first.normalized_drawdown_p75)
+  };
+  const wards = rows.map(row => {
+    const totalVolume = number(row.total_volume_m3);
+    const medianSpecificCapacity = number(row.median_specific_capacity_scaled);
+    const medianNormalizedDrawdown = number(row.median_drawdown_ft_per_m3);
+    return {
+      wardNo: normalizeWardNoValue(row.ward_no),
+      wardName: row.ward_name || "",
+      borewells: Number(row.borewells || 0),
+      validSessions: Number(row.total_sessions || 0),
+      totalPumpedVolumeM3: roundNumber(totalVolume, 2),
+      medianSpecificCapacityScaled: roundNumber(medianSpecificCapacity, 4),
+      medianNormalizedDrawdownFtPerM3: roundNumber(medianNormalizedDrawdown, 4),
+      criticalByExtraction: Number.isFinite(totalVolume) && Number.isFinite(thresholds.extractionP75M3)
+        && totalVolume >= thresholds.extractionP75M3,
+      criticalBySpecificCapacity: Number.isFinite(medianSpecificCapacity) && Number.isFinite(thresholds.specificCapacityP25Scaled)
+        && medianSpecificCapacity <= thresholds.specificCapacityP25Scaled,
+      highNormalizedDrawdown: Number.isFinite(medianNormalizedDrawdown) && Number.isFinite(thresholds.normalizedDrawdownP75FtPerM3)
+        && medianNormalizedDrawdown >= thresholds.normalizedDrawdownP75FtPerM3
+    };
+  });
+  return { wards, thresholds };
 }
 
 function criticalGroundwaterExcelResponse(payload, filename = "critical_wards_groundwater_update.xlsx") {
@@ -3826,6 +3923,25 @@ export default {
           ? `specific_capacity_ward_${normalizedRequestedWardNo || requestedWardNo}.xlsx`
           : "specific_capacity_monthly_by_ward_uid.xlsx";
         return multiSheetExcelResponse(sheets, filename);
+      }
+
+      if (url.pathname === "/api/pumping-performance/wards") {
+        const payload = await pumpingPerformanceWardSummaries(sql);
+        return cachedJson(request, {
+          ...payload,
+          counts: {
+            wardsWithValidSessions: payload.wards.length,
+            extractionCritical: payload.wards.filter(ward => ward.criticalByExtraction).length,
+            specificCapacityCritical: payload.wards.filter(ward => ward.criticalBySpecificCapacity).length,
+            pumpingStressCritical: payload.wards.filter(ward => ward.highNormalizedDrawdown).length
+          },
+          method: {
+            extraction: "Critical when total estimated pumped volume is at or above the citywide ward 75th percentile.",
+            specificCapacity: "Critical when ward median specific capacity is at or below the citywide ward 25th percentile.",
+            pumpingStress: "Critical when ward median volume-normalized drawdown is at or above the citywide ward 75th percentile.",
+            note: "These are relative screening categories among wards with valid pumping sessions, not universal engineering limits."
+          }
+        });
       }
 
       if (url.pathname === "/api/pumping-performance/ward") {
