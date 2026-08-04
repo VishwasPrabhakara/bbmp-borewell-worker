@@ -5203,6 +5203,12 @@ export default {
         }, 503);
       }
 
+      const fallback = await cachedFallback(request);
+      if (fallback) {
+        fallback.headers.set("x-dashboard-cache-fallback-reason", "runtime-error");
+        return fallback;
+      }
+
       if (isMissingRelation(error)) {
         if (url.pathname === "/api/status") {
           return json(statusPayload({ running: false, ok: null, message: "Database is not initialized yet" }));
