@@ -24,7 +24,8 @@ const CACHEABLE_GET_PATHS = new Set([
   "/api/critical-wards-groundwater",
   "/api/population/wards",
   "/api/water-level",
-  "/api/specific-capacity/ward"
+  "/api/specific-capacity/ward",
+  "/api/pumping-performance/ward"
 ]);
 const PREVIOUS_CRITICAL_WARDS = [
   ["48", "Muneshwaranagar"],
@@ -3825,6 +3826,237 @@ export default {
           ? `specific_capacity_ward_${normalizedRequestedWardNo || requestedWardNo}.xlsx`
           : "specific_capacity_monthly_by_ward_uid.xlsx";
         return multiSheetExcelResponse(sheets, filename);
+      }
+
+      if (url.pathname === "/api/pumping-performance/ward") {
+        const requestedWardNo = url.searchParams.get("ward_no");
+        if (!requestedWardNo) return json({ ward: null, sensors: [] }, 400);
+        const normalizedRequestedWardNo = normalizeWardNoValue(requestedWardNo);
+        const rows = await sql`
+          WITH valid_sessions AS (
+            SELECT
+              b.uid,
+              COALESCE(NULLIF(a.ward_no, ''), NULLIF(s.ward_no, '')) AS ward_no,
+              COALESCE(NULLIF(a.ward_name, ''), NULLIF(s.ward_name, '')) AS ward_name,
+              s.lat,
+              s.lng,
+              s.motor_hp,
+              s.borewell_depth,
+              s.pump_name,
+              b.start_time,
+              b.stop_time,
+              b.session_duration_min,
+              b.water_level_stop_ft - b.water_level_start_ft AS drawdown_ft,
+              COALESCE(b.avg_discharge_lpm, b.min_discharge_lpm) AS volume_discharge_lpm,
+              b.min_discharge_lpm,
+              COALESCE(b.avg_discharge_lpm, b.min_discharge_lpm) * b.session_duration_min / 1000.0 AS pumped_volume_m3,
+              (b.min_discharge_lpm * ${LPM_TO_M3_PER_SEC})
+                / ((b.water_level_stop_ft - b.water_level_start_ft) * ${FT_TO_M})
+                * ${TRANSMISSIVITY_SCALE} AS specific_capacity_scaled,
+              (b.water_level_stop_ft - b.water_level_start_ft)
+                / (COALESCE(b.avg_discharge_lpm, b.min_discharge_lpm) * b.session_duration_min / 1000.0)
+                AS drawdown_ft_per_m3
+            FROM uploaded_type_b_sessions b
+            LEFT JOIN sensors s ON s.uid = b.uid
+            LEFT JOIN sensor_ward_assignments a ON a.uid = b.uid
+            WHERE b.start_time IS NOT NULL
+              AND b.stop_time IS NOT NULL
+              AND b.session_duration_min > 0
+              AND b.water_level_start_ft IS NOT NULL
+              AND b.water_level_stop_ft > b.water_level_start_ft
+              AND b.min_discharge_lpm > 0
+              AND COALESCE(b.avg_discharge_lpm, b.min_discharge_lpm) > 0
+              AND COALESCE(NULLIF(a.ward_no, ''), NULLIF(s.ward_no, '')) IS NOT NULL
+          ),
+          uid_performance AS (
+            SELECT
+              uid,
+              ward_no,
+              MAX(ward_name) AS ward_name,
+              MAX(lat) AS lat,
+              MAX(lng) AS lng,
+              MAX(motor_hp) AS motor_hp,
+              MAX(borewell_depth) AS borewell_depth,
+              MAX(pump_name) AS pump_name,
+              COUNT(*)::integer AS sessions,
+              MIN(start_time) AS first_session,
+              MAX(stop_time) AS last_session,
+              SUM(session_duration_min) AS total_duration_min,
+              SUM(pumped_volume_m3) AS total_volume_m3,
+              percentile_cont(0.5) WITHIN GROUP (ORDER BY pumped_volume_m3) AS median_session_volume_m3,
+              percentile_cont(0.5) WITHIN GROUP (ORDER BY drawdown_ft) AS median_drawdown_ft,
+              MAX(drawdown_ft) AS max_drawdown_ft,
+              percentile_cont(0.5) WITHIN GROUP (ORDER BY volume_discharge_lpm) AS median_discharge_lpm,
+              percentile_cont(0.5) WITHIN GROUP (ORDER BY specific_capacity_scaled) AS median_specific_capacity_scaled,
+              percentile_cont(0.5) WITHIN GROUP (ORDER BY drawdown_ft_per_m3) AS median_drawdown_ft_per_m3
+            FROM valid_sessions
+            GROUP BY uid, ward_no
+          ),
+          ward_performance AS (
+            SELECT
+              ward_no,
+              MAX(ward_name) AS ward_name,
+              COUNT(*)::integer AS borewells,
+              COUNT(motor_hp)::integer AS borewells_with_hp,
+              SUM(sessions)::integer AS total_sessions,
+              SUM(total_volume_m3) AS total_volume_m3,
+              percentile_cont(0.5) WITHIN GROUP (ORDER BY total_volume_m3) AS median_uid_volume_m3,
+              percentile_cont(0.5) WITHIN GROUP (ORDER BY median_specific_capacity_scaled) AS median_specific_capacity_scaled,
+              percentile_cont(0.5) WITHIN GROUP (ORDER BY median_drawdown_ft_per_m3) AS median_drawdown_ft_per_m3
+            FROM uid_performance
+            GROUP BY ward_no
+          ),
+          thresholds AS (
+            SELECT
+              percentile_cont(0.25) WITHIN GROUP (ORDER BY median_specific_capacity_scaled) AS uid_sc_p25,
+              percentile_cont(0.75) WITHIN GROUP (ORDER BY median_specific_capacity_scaled) AS uid_sc_p75,
+              percentile_cont(0.50) WITHIN GROUP (ORDER BY median_drawdown_ft_per_m3) AS uid_stress_p50,
+              percentile_cont(0.75) WITHIN GROUP (ORDER BY median_drawdown_ft_per_m3) AS uid_stress_p75,
+              percentile_cont(0.75) WITHIN GROUP (ORDER BY total_volume_m3) AS uid_volume_p75
+            FROM uid_performance
+          ),
+          ward_thresholds AS (
+            SELECT
+              percentile_cont(0.75) WITHIN GROUP (ORDER BY median_drawdown_ft_per_m3) AS ward_stress_p75,
+              percentile_cont(0.25) WITHIN GROUP (ORDER BY median_specific_capacity_scaled) AS ward_sc_p25,
+              percentile_cont(0.75) WITHIN GROUP (ORDER BY total_volume_m3) AS ward_volume_p75
+            FROM ward_performance
+          )
+          SELECT
+            u.*,
+            w.borewells,
+            w.borewells_with_hp,
+            w.total_sessions,
+            w.total_volume_m3 AS ward_total_volume_m3,
+            w.median_uid_volume_m3,
+            w.median_specific_capacity_scaled AS ward_median_specific_capacity_scaled,
+            w.median_drawdown_ft_per_m3 AS ward_median_drawdown_ft_per_m3,
+            t.uid_sc_p25,
+            t.uid_sc_p75,
+            t.uid_stress_p50,
+            t.uid_stress_p75,
+            t.uid_volume_p75,
+            wt.ward_stress_p75,
+            wt.ward_sc_p25,
+            wt.ward_volume_p75
+          FROM uid_performance u
+          JOIN ward_performance w ON w.ward_no = u.ward_no
+          CROSS JOIN thresholds t
+          CROSS JOIN ward_thresholds wt
+          WHERE regexp_replace(u.ward_no, '\\.0+$', '') = ${normalizedRequestedWardNo}
+          ORDER BY u.median_drawdown_ft_per_m3 DESC NULLS LAST, u.uid
+        `;
+
+        if (!rows.length) {
+          return cachedJson(request, {
+            ward: null,
+            sensors: [],
+            method: {
+              volume: "Pumped volume (m3) = average session discharge (L/min) x pumping duration (min) / 1000. Minimum discharge is used only when average discharge is unavailable.",
+              normalizedDrawdown: "Volume-normalized drawdown (ft/m3) = pumping drawdown (ft) / pumped volume (m3)."
+            }
+          });
+        }
+
+        const first = rows[0];
+        const number = value => {
+          const parsed = Number(value);
+          return Number.isFinite(parsed) ? parsed : null;
+        };
+        const thresholds = {
+          uidSpecificCapacityP25: number(first.uid_sc_p25),
+          uidSpecificCapacityP75: number(first.uid_sc_p75),
+          uidNormalizedDrawdownP50: number(first.uid_stress_p50),
+          uidNormalizedDrawdownP75: number(first.uid_stress_p75),
+          uidTotalVolumeP75: number(first.uid_volume_p75),
+          wardNormalizedDrawdownP75: number(first.ward_stress_p75),
+          wardSpecificCapacityP25: number(first.ward_sc_p25),
+          wardTotalVolumeP75: number(first.ward_volume_p75)
+        };
+        const sensors = rows.map(row => {
+          const specificCapacity = number(row.median_specific_capacity_scaled);
+          const normalizedDrawdown = number(row.median_drawdown_ft_per_m3);
+          const totalVolume = number(row.total_volume_m3);
+          const specificCapacityClass = specificCapacity <= thresholds.uidSpecificCapacityP25
+            ? "Low performance"
+            : specificCapacity >= thresholds.uidSpecificCapacityP75
+              ? "High performance"
+              : "Medium performance";
+          const normalizedDrawdownClass = normalizedDrawdown >= thresholds.uidNormalizedDrawdownP75
+            ? "High stress"
+            : normalizedDrawdown <= thresholds.uidNormalizedDrawdownP50
+              ? "Low stress"
+              : "Moderate stress";
+          const highExtraction = totalVolume >= thresholds.uidTotalVolumeP75;
+          const interpretation = specificCapacityClass === "Low performance" && normalizedDrawdownClass === "High stress"
+            ? "High priority"
+            : highExtraction
+              ? "High extraction"
+              : specificCapacityClass === "High performance" && normalizedDrawdownClass === "Low stress"
+                ? "Good performer"
+                : "Moderate / normal";
+          const motorHp = number(row.motor_hp);
+          return {
+            uid: String(row.uid),
+            wardNo: row.ward_no,
+            wardName: row.ward_name,
+            lat: number(row.lat),
+            lng: number(row.lng),
+            motorHp,
+            borewellDepth: number(row.borewell_depth),
+            pumpName: row.pump_name || null,
+            sessions: number(row.sessions),
+            firstSession: row.first_session,
+            lastSession: row.last_session,
+            totalDurationMin: roundNumber(row.total_duration_min, 1),
+            totalPumpedVolumeM3: roundNumber(totalVolume, 2),
+            medianSessionVolumeM3: roundNumber(row.median_session_volume_m3, 2),
+            medianDrawdownFt: roundNumber(row.median_drawdown_ft, 2),
+            maxDrawdownFt: roundNumber(row.max_drawdown_ft, 2),
+            medianDischargeLpm: roundNumber(row.median_discharge_lpm, 2),
+            medianSpecificCapacityScaled: roundNumber(specificCapacity, 4),
+            medianNormalizedDrawdownFtPerM3: roundNumber(normalizedDrawdown, 4),
+            totalVolumeM3PerHp: motorHp > 0 ? roundNumber(totalVolume / motorHp, 2) : null,
+            specificCapacityClass,
+            normalizedDrawdownClass,
+            extractionClass: highExtraction ? "High extraction" : "Normal extraction",
+            interpretation
+          };
+        });
+        const wardNormalizedDrawdown = number(first.ward_median_drawdown_ft_per_m3);
+        const wardSpecificCapacity = number(first.ward_median_specific_capacity_scaled);
+        const wardTotalVolume = number(first.ward_total_volume_m3);
+        const wardClassification = wardNormalizedDrawdown >= thresholds.wardNormalizedDrawdownP75
+          ? "High pumping stress"
+          : wardSpecificCapacity <= thresholds.wardSpecificCapacityP25
+            ? "Low specific-capacity performance"
+            : wardTotalVolume >= thresholds.wardTotalVolumeP75
+              ? "High extraction"
+              : "Normal pumping performance";
+
+        return cachedJson(request, {
+          ward: {
+            wardNo: first.ward_no,
+            wardName: first.ward_name,
+            borewells: number(first.borewells),
+            borewellsWithHp: number(first.borewells_with_hp),
+            totalSessions: number(first.total_sessions),
+            totalPumpedVolumeM3: roundNumber(wardTotalVolume, 2),
+            medianUidPumpedVolumeM3: roundNumber(first.median_uid_volume_m3, 2),
+            medianSpecificCapacityScaled: roundNumber(wardSpecificCapacity, 4),
+            medianNormalizedDrawdownFtPerM3: roundNumber(wardNormalizedDrawdown, 4),
+            classification: wardClassification,
+            highPriorityUids: sensors.filter(sensor => sensor.interpretation === "High priority").length,
+            highExtractionUids: sensors.filter(sensor => sensor.extractionClass === "High extraction").length
+          },
+          sensors,
+          thresholds,
+          method: {
+            volume: "Pumped volume (m3) = average session discharge (L/min) x pumping duration (min) / 1000. Minimum discharge is used only when average discharge is unavailable.",
+            normalizedDrawdown: "Volume-normalized drawdown (ft/m3) = pumping drawdown (ft) / pumped volume (m3). Higher values indicate a larger water-level response per unit extracted volume.",
+            classification: "Screening classes use current citywide percentile thresholds and update with the database. They are relative screening categories, not universal engineering limits."
+          }
+        });
       }
 
       if (url.pathname === "/api/specific-capacity/ward") {
