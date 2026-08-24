@@ -101,6 +101,68 @@ export async function gunzipJsonPayload(value) {
   return JSON.parse(text);
 }
 
+async function wardRainfallSummaryMap(sql, wardNo = null) {
+  const normalizedWardNo = wardNo ? normalizeWardNoValue(wardNo) : null;
+  const rows = normalizedWardNo ? await sql`
+    SELECT
+      regexp_replace(ward_no, '\\.0+$', '') AS ward_no,
+      EXTRACT(YEAR FROM date)::integer AS year,
+      source,
+      SUM(COALESCE(rainfall_mm, 0)) AS rainfall_mm,
+      MIN(date) AS first_date,
+      MAX(date) AS last_date
+    FROM ward_daily_rainfall
+    WHERE source IN ('CHIRPS', 'NASA_POWER')
+      AND regexp_replace(ward_no, '\\.0+$', '') = ${normalizedWardNo}
+    GROUP BY regexp_replace(ward_no, '\\.0+$', ''), source, EXTRACT(YEAR FROM date)::integer
+    ORDER BY source, year
+  ` : await sql`
+    SELECT
+      regexp_replace(ward_no, '\\.0+$', '') AS ward_no,
+      EXTRACT(YEAR FROM date)::integer AS year,
+      source,
+      SUM(COALESCE(rainfall_mm, 0)) AS rainfall_mm,
+      MIN(date) AS first_date,
+      MAX(date) AS last_date
+    FROM ward_daily_rainfall
+    WHERE source IN ('CHIRPS', 'NASA_POWER')
+    GROUP BY regexp_replace(ward_no, '\\.0+$', ''), source, EXTRACT(YEAR FROM date)::integer
+    ORDER BY ward_no, source, year
+  `;
+
+  const currentYear = new Date().getUTCFullYear();
+  const map = new Map();
+  for (const row of rows) {
+    const key = normalizeWardNoValue(row.ward_no);
+    const source = String(row.source || "Rainfall");
+    const existing = map.get(key);
+    if (existing?.source === "CHIRPS" && source !== "CHIRPS") continue;
+    const item = (!existing || (existing.source !== "CHIRPS" && source === "CHIRPS")) ? {
+      source,
+      totalRainfallMm: 0,
+      currentYearRainfallMm: 0,
+      firstRainfallDate: null,
+      lastRainfallDate: null,
+      yearTotals: []
+    } : existing;
+    const rainfall = Number(row.rainfall_mm || 0);
+    const year = Number(row.year);
+    item.totalRainfallMm += rainfall;
+    if (year === currentYear) item.currentYearRainfallMm += rainfall;
+    const firstDate = datePart(row.first_date);
+    const lastDate = datePart(row.last_date);
+    item.yearTotals.push({ year, rainfallMm: roundNumber(rainfall, 1) });
+    if (!item.firstRainfallDate || firstDate < item.firstRainfallDate) item.firstRainfallDate = firstDate;
+    if (!item.lastRainfallDate || lastDate > item.lastRainfallDate) item.lastRainfallDate = lastDate;
+    map.set(key, item);
+  }
+  for (const item of map.values()) {
+    item.totalRainfallMm = roundNumber(item.totalRainfallMm, 1);
+    item.currentYearRainfallMm = roundNumber(item.currentYearRainfallMm, 1);
+  }
+  return map;
+}
+
 export async function handleRequest(request, env) {
   if (request.method === "OPTIONS") return json({ ok: true });
 
@@ -1169,6 +1231,10 @@ export async function handleRequest(request, env) {
       `;
 
       const payload = weeklyWardPayload(rows, qcRows, Boolean(wardNo));
+      const rainfallByWardNo = await wardRainfallSummaryMap(sql, wardNo);
+      for (const ward of payload.wards) {
+        ward.rainfall = rainfallByWardNo.get(normalizeWardNoValue(ward.wardNo)) || null;
+      }
       return cachedJson(request, wardNo ? {
         ward: payload.wards.find(ward => normalizeWardNoValue(ward.wardNo) === normalizedWardNo) || null,
         weeks: payload.weeks
