@@ -220,7 +220,7 @@ export async function handleRequest(request, env) {
       await ensureSensorMetadataColumns(sql);
       const rows = await sql`
         SELECT
-          uploaded.uid AS uid,
+          COALESCE(s.uid, uploaded.uid) AS uid,
           COALESCE(uploaded.lat, s.lat) AS lat,
           COALESCE(uploaded.lng, s.lng) AS lng,
           COALESCE(NULLIF(s.ward_no, ''), NULLIF(q.ward_no, ''), NULLIF(a.ward_no, '')) AS ward_no,
@@ -229,21 +229,22 @@ export async function handleRequest(request, env) {
           s.borewell_depth,
           s.pump_name,
           CASE
-            WHEN COALESCE(uploaded.water_readings, 0) > 0 AND COALESCE(uploaded.discharge_readings, 0) > 0 THEN 'both'
-            WHEN COALESCE(uploaded.water_readings, 0) > 0 THEN 'water'
+            WHEN uploaded.uid IS NOT NULL AND COALESCE(uploaded.water_readings, 0) > 0 AND COALESCE(uploaded.discharge_readings, 0) > 0 THEN 'both'
+            WHEN uploaded.uid IS NOT NULL AND COALESCE(uploaded.water_readings, 0) > 0 THEN 'both'
             ELSE 'none'
           END AS data_category,
-          COALESCE(uploaded.water_readings, 0) > 0 OR COALESCE(uploaded.discharge_readings, 0) > 0 AS has_data,
-          uploaded.first_data_at,
-          uploaded.last_data_at,
+          uploaded.uid IS NOT NULL
+            AND (COALESCE(uploaded.water_readings, 0) > 0 OR COALESCE(uploaded.discharge_readings, 0) > 0) AS has_data,
+          COALESCE(uploaded.first_data_at, s.first_data_at) AS first_data_at,
+          COALESCE(uploaded.last_data_at, s.last_data_at) AS last_data_at,
           COALESCE(uploaded.water_readings, 0) AS water_readings,
           COALESCE(uploaded.discharge_readings, 0) AS discharge_readings,
           COALESCE(uploaded.total_readings, 0) AS total_readings
-        FROM uploaded_sensor_series uploaded
-        LEFT JOIN sensors s ON s.uid = uploaded.uid
-        LEFT JOIN sensor_qc_summary q ON q.uid = uploaded.uid
-        LEFT JOIN sensor_ward_assignments a ON a.uid = uploaded.uid
-        ORDER BY uploaded.uid
+        FROM sensors s
+        FULL OUTER JOIN uploaded_sensor_series uploaded ON uploaded.uid = s.uid
+        LEFT JOIN sensor_qc_summary q ON q.uid = COALESCE(s.uid, uploaded.uid)
+        LEFT JOIN sensor_ward_assignments a ON a.uid = COALESCE(s.uid, uploaded.uid)
+        ORDER BY COALESCE(s.uid, uploaded.uid)
       `;
 
       return cachedJson(request, {
