@@ -422,14 +422,14 @@ export async function handleRequest(request, env) {
           const payload = await gunzipJsonPayload(sensor.payload_gzip);
           const points = payload.filter(point => point.time).sort((a, b) => String(a.time).localeCompare(String(b.time)));
           let openSession = null;
-          for (const point of points) {
-            const offLevel = compactPointLevel(point, "off_level");
+        for (const point of points) {
             const onLevel = compactPointLevel(point, "on_level");
+            const offLevel = compactPointLevel(point, "off_level");
             const discharge = compactPointDischarge(point);
             const sameRecordDurationMin = compactPointDurationMinutes(point);
 
             if (offLevel !== null && onLevel !== null && discharge !== null && discharge > 0) {
-              const drawdown = onLevel - offLevel;
+              const drawdown = offLevel - onLevel;
               if (drawdown > 0 && sameRecordDurationMin !== null && Math.round(sameRecordDurationMin) > 0) {
                 payloadRows.push({
                   ward_no: sensor.ward_no,
@@ -440,8 +440,8 @@ export async function handleRequest(request, env) {
                   start_time: point.time,
                   stop_time: point.stop_time || point.time,
                   duration_min: sameRecordDurationMin,
-                  water_level_start_ft: offLevel,
-                  water_level_stop_ft: onLevel,
+                  water_level_start_ft: onLevel,
+                  water_level_stop_ft: offLevel,
                   drawdown_ft: drawdown,
                   min_discharge_lpm: discharge,
                   start_discharge_lpm: discharge,
@@ -456,14 +456,14 @@ export async function handleRequest(request, env) {
               }
             }
 
-            if (offLevel !== null) {
-              openSession = { start_time: point.time, water_level_start_ft: offLevel, discharges: [] };
+            if (onLevel !== null) {
+              openSession = { start_time: point.time, water_level_start_ft: onLevel, discharges: [] };
             }
             if (openSession && discharge !== null && discharge > 0) {
               openSession.discharges.push(discharge);
             }
-            if (openSession && onLevel !== null) {
-              const drawdown = onLevel - openSession.water_level_start_ft;
+            if (openSession && offLevel !== null) {
+              const drawdown = offLevel - openSession.water_level_start_ft;
               const discharges = openSession.discharges;
               const durationMin = minutesBetween(openSession.start_time, point.time);
               if (drawdown > 0 && discharges.length && durationMin !== null && Math.round(durationMin) > 0) {
@@ -477,7 +477,7 @@ export async function handleRequest(request, env) {
                   stop_time: point.time,
                   duration_min: durationMin,
                   water_level_start_ft: openSession.water_level_start_ft,
-                  water_level_stop_ft: onLevel,
+                  water_level_stop_ft: offLevel,
                   drawdown_ft: drawdown,
                   min_discharge_lpm: Math.min(...discharges),
                   start_discharge_lpm: discharges[0],
@@ -752,13 +752,13 @@ export async function handleRequest(request, env) {
         let bridgedSessionCandidateCount = 0;
         let openSession = null;
         for (const point of points) {
-          const offLevel = compactPointLevel(point, "off_level");
           const onLevel = compactPointLevel(point, "on_level");
+          const offLevel = compactPointLevel(point, "off_level");
           const discharge = compactPointDischarge(point);
           const sameRecordDurationMin = compactPointDurationMinutes(point);
           if (offLevel !== null && onLevel !== null && discharge !== null && discharge > 0) {
             sameRecordCandidateCount += 1;
-            const drawdownFt = onLevel - offLevel;
+            const drawdownFt = offLevel - onLevel;
             if (sameRecordDurationMin !== null && Math.round(sameRecordDurationMin) > 0 && drawdownFt > 0) {
               const drawdownM = drawdownFt * FT_TO_M;
               if (drawdownM < MIN_MONTHLY_DRAWDOWN_M) {
@@ -775,8 +775,8 @@ export async function handleRequest(request, env) {
                 stopTime: point.stop_time || point.time,
                 durationMin: Math.round(sameRecordDurationMin),
                 durationSeconds: Math.round(sameRecordDurationMin * 60),
-                startWaterLevelM: roundNumber(offLevel * FT_TO_M, 3),
-                stopWaterLevelM: roundNumber(onLevel * FT_TO_M, 3),
+                startWaterLevelM: roundNumber(onLevel * FT_TO_M, 3),
+                stopWaterLevelM: roundNumber(offLevel * FT_TO_M, 3),
                 drawdownM: roundNumber(drawdownM, 3),
                 lowestDischargeM3s: roundNumber(lowestDischargeM3s, 8),
                 specificCapacityM2s: roundNumber(specificCapacityM2s, 8),
@@ -787,15 +787,15 @@ export async function handleRequest(request, env) {
               continue;
             }
           }
-          if (offLevel !== null) {
-            openSession = { startTime: point.time, startLevelFt: offLevel, discharges: [] };
+          if (onLevel !== null) {
+            openSession = { startTime: point.time, startLevelFt: onLevel, discharges: [] };
           }
           if (openSession && discharge !== null && discharge > 0) {
             openSession.discharges.push(discharge);
           }
-          if (openSession && onLevel !== null) {
+          if (openSession && offLevel !== null) {
             const durationMin = minutesBetween(openSession.startTime, point.time);
-            const drawdownFt = onLevel - openSession.startLevelFt;
+            const drawdownFt = offLevel - openSession.startLevelFt;
             bridgedSessionCandidateCount += 1;
             if (durationMin !== null && Math.round(durationMin) > 0 && drawdownFt > 0 && openSession.discharges.length) {
               const drawdownM = drawdownFt * FT_TO_M;
@@ -814,7 +814,7 @@ export async function handleRequest(request, env) {
                 durationMin: Math.round(durationMin),
                 durationSeconds: Math.round(durationMin * 60),
                 startWaterLevelM: roundNumber(openSession.startLevelFt * FT_TO_M, 3),
-                stopWaterLevelM: roundNumber(onLevel * FT_TO_M, 3),
+                stopWaterLevelM: roundNumber(offLevel * FT_TO_M, 3),
                 drawdownM: roundNumber(drawdownM, 3),
                 lowestDischargeM3s: roundNumber(lowestDischargeM3s, 8),
                 specificCapacityM2s: roundNumber(specificCapacityM2s, 8),
@@ -1105,13 +1105,13 @@ export async function handleRequest(request, env) {
         ),
         type_b_points AS (
           SELECT
-            q.ward_no, q.ward_name, q.uid, b.stop_time AS reading_time,
-            b.water_level_stop_ft AS water_level_ft, b.water_level_stop_ft AS on_level,
-            b.water_level_start_ft AS off_level,
+            q.ward_no, q.ward_name, q.uid, b.start_time AS reading_time,
+            b.water_level_start_ft AS water_level_ft, b.water_level_start_ft AS on_level,
+            b.water_level_stop_ft AS off_level,
             COALESCE(b.session_duration_min, EXTRACT(EPOCH FROM (b.stop_time - b.start_time)) / 60) / 60 AS runtime_hours
           FROM uploaded_type_b_sessions b
           JOIN good_sensors q ON q.uid = b.uid
-          WHERE b.water_level_stop_ft IS NOT NULL
+          WHERE b.water_level_start_ft IS NOT NULL
         ),
         kh_points AS (
           SELECT
@@ -1141,13 +1141,13 @@ export async function handleRequest(request, env) {
         ),
         type_b_points AS (
           SELECT
-            q.ward_no, q.ward_name, q.uid, b.stop_time AS reading_time,
-            b.water_level_stop_ft AS water_level_ft, b.water_level_stop_ft AS on_level,
-            b.water_level_start_ft AS off_level,
+            q.ward_no, q.ward_name, q.uid, b.start_time AS reading_time,
+            b.water_level_start_ft AS water_level_ft, b.water_level_start_ft AS on_level,
+            b.water_level_stop_ft AS off_level,
             COALESCE(b.session_duration_min, EXTRACT(EPOCH FROM (b.stop_time - b.start_time)) / 60) / 60 AS runtime_hours
           FROM uploaded_type_b_sessions b
           JOIN good_sensors q ON q.uid = b.uid
-          WHERE b.water_level_stop_ft IS NOT NULL
+          WHERE b.water_level_start_ft IS NOT NULL
         ),
         kh_points AS (
           SELECT
@@ -1259,13 +1259,13 @@ export async function handleRequest(request, env) {
       await ensureUploadedTables(sql);
       const uploaded = await sql`
         WITH type_b_points AS (
-          SELECT start_time AS time, water_level_start_ft AS water_level, NULL::double precision AS on_level,
-                 water_level_start_ft AS off_level, NULL::double precision AS discharge
+          SELECT start_time AS time, water_level_start_ft AS water_level, water_level_start_ft AS on_level,
+                 NULL::double precision AS off_level, NULL::double precision AS discharge
           FROM uploaded_type_b_sessions
           WHERE uid = ${uid}
           UNION ALL
-          SELECT stop_time AS time, water_level_stop_ft AS water_level, water_level_stop_ft AS on_level,
-                 NULL::double precision AS off_level, NULL::double precision AS discharge
+          SELECT stop_time AS time, water_level_stop_ft AS water_level, NULL::double precision AS on_level,
+                 water_level_stop_ft AS off_level, NULL::double precision AS discharge
           FROM uploaded_type_b_sessions
           WHERE uid = ${uid}
         ),

@@ -21,6 +21,8 @@ export function isValidWaterLevel(value) {
 }
 
 export function primaryLevel(point) {
+  // For KH cleaned pumping sessions, ON/start is the static level before pumping.
+  // Use it for groundwater trend; OFF/stop is the drawdown level.
   if (isValidWaterLevel(point.onLevel)) return Number(point.onLevel);
   if (isValidWaterLevel(point.waterLevel)) return Number(point.waterLevel);
   if (isValidWaterLevel(point.offLevel)) return Number(point.offLevel);
@@ -30,9 +32,9 @@ export function primaryLevel(point) {
 export function compactPointLevel(point, key = "water_level") {
   if (!point) return null;
   const keys = key === "off_level"
-    ? ["offLevel", "off_level", "waterLevelStartFt", "water_level_start_ft"]
+    ? ["offLevel", "off_level", "waterLevelStopFt", "water_level_stop_ft"]
     : key === "on_level"
-      ? ["onLevel", "on_level", "waterLevelStopFt", "water_level_stop_ft"]
+      ? ["onLevel", "on_level", "waterLevelStartFt", "water_level_start_ft"]
       : ["waterLevel", "water_level", "level", "waterLevelFt", "water_level_ft"];
   for (const itemKey of keys) {
     const value = Number(point[itemKey]);
@@ -546,6 +548,11 @@ export function notUsableReason(row) {
     SPIKES: `${row.spike_count || 0} sudden spike/drop events detected between consecutive readings.`,
     FLATLINES: `${row.flatline_count || 0} flatline stretches detected, suggesting the sensor may be stuck or not updating.`,
     DUPLICATE_TIMESTAMPS: "Duplicate timestamps were found in the raw readings.",
+    NO_VALID_PUMPING_SESSIONS: "No valid ON-to-OFF pumping sessions were found for this UID.",
+    INVALID_DRAWDOWN_SESSIONS: "Some sessions have stop/OFF water level shallower than or equal to start/ON water level, so drawdown is not physically valid for pumping analysis.",
+    NO_DISCHARGE_SESSIONS: "Some sessions have no positive discharge value, so specific capacity cannot be calculated for those sessions.",
+    BAD_DURATION_SESSIONS: "Some sessions have zero or invalid pumping duration.",
+    LOW_CLEAN_SESSION_PERCENT: "Less than half of the sessions are clean enough for pumping analysis.",
     OUTSIDE_BBMP_BOUNDARY: "Sensor location falls outside the BBMP ward boundary layer."
   };
 

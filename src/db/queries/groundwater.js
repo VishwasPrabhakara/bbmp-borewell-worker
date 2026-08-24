@@ -38,15 +38,15 @@ export async function khWeeklyPayload(sql, includeSensorDetails = false) {
       q.ward_no,
       q.ward_name,
       q.uid,
-      b.stop_time AS reading_time,
-      b.water_level_stop_ft AS water_level_ft,
-      b.water_level_stop_ft AS on_level,
-      b.water_level_start_ft AS off_level,
+      b.start_time AS reading_time,
+      b.water_level_start_ft AS water_level_ft,
+      b.water_level_start_ft AS on_level,
+      b.water_level_stop_ft AS off_level,
       COALESCE(b.session_duration_min, EXTRACT(EPOCH FROM (b.stop_time - b.start_time)) / 60) / 60 AS runtime_hours
     FROM uploaded_type_b_sessions b
     JOIN good_sensors q ON q.uid = b.uid
-    WHERE b.water_level_stop_ft IS NOT NULL
-    ORDER BY q.ward_no, q.uid, b.stop_time
+    WHERE b.water_level_start_ft IS NOT NULL
+    ORDER BY q.ward_no, q.uid, b.start_time
   ` : await sql`
     WITH good_sensors AS (
       SELECT uid, ward_no, ward_name
