@@ -70,6 +70,7 @@ export async function getQcSensors(sql, source, wardNoFilter, statusFilter) {
       s.borewell_depth,
       s.pump_name
     FROM sensor_qc_summary q
+    JOIN uploaded_sensor_series uploaded ON uploaded.uid = q.uid
     LEFT JOIN sensors s ON s.uid = q.uid
     ORDER BY NULLIF(regexp_replace(q.ward_no, '[^0-9.]', '', 'g'), '')::numeric NULLS LAST, q.ward_no, q.uid
   `;
@@ -137,20 +138,28 @@ export async function getQcWards(sql, source) {
     ORDER BY NULLIF(regexp_replace(ward_no, '[^0-9.]', '', 'g'), '')::numeric NULLS LAST, ward_no
   ` : await sql`
     SELECT
-      ward_no,
-      ward_name,
-      total_sensors,
-      good_sensors,
-      usable_caution_sensors,
-      poor_sensors,
-      no_data_sensors,
-      not_usable_sensors,
-      good_percent,
-      avg_qc_score,
-      good_uids,
-      not_usable_uids
-    FROM ward_sensor_qc_summary
-    ORDER BY NULLIF(regexp_replace(ward_no, '[^0-9.]', '', 'g'), '')::numeric NULLS LAST, ward_no
+      COALESCE(NULLIF(q.ward_no, ''), NULLIF(s.ward_no, ''), NULLIF(a.ward_no, '')) AS ward_no,
+      COALESCE(NULLIF(q.ward_name, ''), NULLIF(s.ward_name, ''), NULLIF(a.ward_name, '')) AS ward_name,
+      COUNT(*)::integer AS total_sensors,
+      COUNT(*) FILTER (WHERE q.qc_status = 'GOOD')::integer AS good_sensors,
+      COUNT(*) FILTER (WHERE q.qc_status = 'USABLE_WITH_CAUTION')::integer AS usable_caution_sensors,
+      COUNT(*) FILTER (WHERE q.qc_status = 'POOR')::integer AS poor_sensors,
+      COUNT(*) FILTER (WHERE q.qc_status IN ('NO_DATA', 'INSUFFICIENT_DATA'))::integer AS no_data_sensors,
+      COUNT(*) FILTER (WHERE q.qc_status <> 'GOOD')::integer AS not_usable_sensors,
+      ROUND((COUNT(*) FILTER (WHERE q.qc_status = 'GOOD')::numeric / NULLIF(COUNT(*)::numeric, 0)) * 100, 1)::double precision AS good_percent,
+      ROUND(AVG(overall_qc_score)::numeric, 1)::double precision AS avg_qc_score,
+      ARRAY_AGG(q.uid ORDER BY q.uid) FILTER (WHERE q.qc_status = 'GOOD') AS good_uids,
+      ARRAY_AGG(q.uid ORDER BY q.uid) FILTER (WHERE q.qc_status <> 'GOOD') AS not_usable_uids
+    FROM sensor_qc_summary q
+    JOIN uploaded_sensor_series uploaded ON uploaded.uid = q.uid
+    LEFT JOIN sensors s ON s.uid = q.uid
+    LEFT JOIN sensor_ward_assignments a ON a.uid = q.uid
+    WHERE COALESCE(NULLIF(q.ward_no, ''), NULLIF(s.ward_no, ''), NULLIF(a.ward_no, '')) IS NOT NULL
+    GROUP BY
+      COALESCE(NULLIF(q.ward_no, ''), NULLIF(s.ward_no, ''), NULLIF(a.ward_no, '')),
+      COALESCE(NULLIF(q.ward_name, ''), NULLIF(s.ward_name, ''), NULLIF(a.ward_name, ''))
+    ORDER BY NULLIF(regexp_replace(COALESCE(NULLIF(q.ward_no, ''), NULLIF(s.ward_no, ''), NULLIF(a.ward_no, '')), '[^0-9.]', '', 'g'), '')::numeric NULLS LAST,
+      COALESCE(NULLIF(q.ward_no, ''), NULLIF(s.ward_no, ''), NULLIF(a.ward_no, ''))
   `;
 
   return rows.map(row => {

@@ -36,7 +36,7 @@ import {
   criticalGroundwaterExcelResponse,
   criticalWardComparisonExcelResponse
 } from "./utils/excel.js";
-import { formatExcelDateTime, minutesBetween, datePart } from "./date.js";
+import { formatExcelDateTime, minutesBetween, datePart } from "./utils/date.js";
 import {
   notUsableReason,
   normalizeWardNoValue,
@@ -287,22 +287,23 @@ export async function handleRequest(request, env) {
 
     if (url.pathname === "/api/qc/not-usable-sensors.xlsx" || url.pathname === "/api/qc/not-usable-sensors.csv") {
       const rows = await sql`
-        SELECT *
-        FROM sensor_qc_summary
-        WHERE qc_status <> 'GOOD'
+        SELECT q.*
+        FROM sensor_qc_summary q
+        JOIN uploaded_sensor_series uploaded ON uploaded.uid = q.uid
+        WHERE q.qc_status <> 'GOOD'
           AND (
-            COALESCE(total_readings, 0) > 0
-            OR qc_status <> 'NO_DATA'
+            COALESCE(q.total_readings, 0) > 0
+            OR q.qc_status <> 'NO_DATA'
           )
         ORDER BY
-          CASE qc_status
+          CASE q.qc_status
             WHEN 'POOR' THEN 1
             WHEN 'USABLE_WITH_CAUTION' THEN 2
             WHEN 'INSUFFICIENT_DATA' THEN 3
             ELSE 4
           END,
-          ward_no,
-          uid
+          q.ward_no,
+          q.uid
       `;
       const headers = [
         "uid", "ward_no", "ward_name", "first_data_at", "last_data_at",

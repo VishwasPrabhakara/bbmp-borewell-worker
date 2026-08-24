@@ -121,7 +121,7 @@ export async function pumpingPerformanceWardSummaries(sql) {
         COUNT(*)::integer AS sessions,
         SUM(pumped_volume_m3) AS total_volume_m3,
         percentile_cont(0.5) WITHIN GROUP (ORDER BY specific_capacity_scaled) AS median_specific_capacity_scaled,
-        percentile_cont(0.5) WITHIN GROUP (ORDER BY median_drawdown_ft_per_m3) AS median_drawdown_ft_per_m3
+        percentile_cont(0.5) WITHIN GROUP (ORDER BY drawdown_ft_per_m3) AS median_drawdown_ft_per_m3
       FROM valid_sessions
       GROUP BY uid, ward_no
     ),

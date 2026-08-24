@@ -30,6 +30,7 @@ import {
   criticalWardMap,
   weeklyWardPayload
 } from "./data-cleaning.js";
+import { khWeeklyPayload, criticalGroundwaterRows } from "../db/queries/groundwater.js";
 
 export function waterLevelCell(value) {
   if (value === null || value === undefined || value === "") return "";
@@ -451,4 +452,115 @@ export function weeklyLevelsExcelResponse(rows, filename) {
       "access-control-allow-origin": "*"
     }
   });
+}
+
+export function criticalGroundwaterExcelResponse(payload) {
+  const { rows, pairRows } = criticalGroundwaterRows(payload, {
+    includeWeeklyColumns: true,
+    includePairRows: true
+  });
+  const summaryHeaders = Array.from(rows.reduce((headers, row) => {
+    Object.keys(row).forEach(key => headers.add(key));
+    return headers;
+  }, new Set()));
+  const summaryRows = rows.map(row => summaryHeaders.map(header => row[header]));
+  return multiSheetExcelResponse([
+    {
+      name: "Ward Summary",
+      headers: summaryHeaders,
+      rows: summaryRows
+    },
+    {
+      name: "Week Comparisons",
+      headers: [
+        "ward_no",
+        "ward_name",
+        "previous_critical_ward",
+        "from_week",
+        "to_week",
+        "start_level_ft",
+        "end_level_ft",
+        "change_ft",
+        "change_ft_per_week",
+        "change_ft_per_day",
+        "week_gap",
+        "sensor_count"
+      ],
+      rows: pairRows
+    },
+    {
+      name: "Method Notes",
+      headers: ["Item", "Value"],
+      rows: [
+        ["Minimum weekly values", CRITICAL_GW_MIN_WEEKS],
+        ["Minimum week comparisons", CRITICAL_GW_MIN_COMPARISONS],
+        ["Maximum allowed week gap", CRITICAL_GW_MAX_WEEK_GAP],
+        ["Large jump minimum checked (ft)", CRITICAL_GW_MIN_LARGE_JUMP_FT],
+        ["Relative jump ratio checked", CRITICAL_GW_RELATIVE_JUMP_RATIO],
+        ["Decline threshold (ft/week)", CRITICAL_GW_DECLINE_FT_PER_WEEK],
+        ["Mann-Kendall alpha", TREND_SIGNIFICANCE_ALPHA],
+        ["Specific wording", "Groundwater depth increasing means the water level is going deeper below surface."]
+      ]
+    }
+  ], "critical_wards_groundwater.xlsx");
+}
+
+export async function criticalWardComparisonExcelResponse(sql) {
+  const payload = await khWeeklyPayload(sql);
+  const { rows } = criticalGroundwaterRows(payload, {
+    includeWeeklyColumns: false,
+    includePairRows: false
+  });
+  const previousRows = rows.filter(row => row.previousCriticalWard === "Yes");
+  const comparisonRows = previousRows.map(row => [
+    row.wardNo,
+    row.wardName,
+    row.previousCriticalWard,
+    row.oldConsumptionNoGroundwaterData === "Yes" ? "No" : "Yes",
+    row.groundwaterStatus,
+    row.dashboardMapCategory,
+    row.dashboardAction,
+    row.computed,
+    row.usableWeeklyValues,
+    row.validWeeklyComparisons,
+    row.linearSlopeFtPerWeek,
+    row.senSlopeFtPerWeek,
+    row.mannKendallPValue,
+    row.updateReason
+  ]);
+  const counts = [
+    ["Previous consumption-critical wards", previousRows.length],
+    ["With groundwater data", previousRows.filter(row => row.oldConsumptionNoGroundwaterData !== "Yes").length],
+    ["No groundwater data", previousRows.filter(row => row.oldConsumptionNoGroundwaterData === "Yes").length],
+    ["Currently critical from groundwater", previousRows.filter(row => row.groundwaterStatus === "Critical").length],
+    ["Currently review/watch from groundwater", previousRows.filter(row => row.groundwaterStatus === "Watch").length],
+    ["Not critical from groundwater", previousRows.filter(row => row.oldConsumptionNoGroundwaterData !== "Yes" && row.groundwaterStatus !== "Critical" && row.groundwaterStatus !== "Watch").length]
+  ];
+  return multiSheetExcelResponse([
+    {
+      name: "Comparison Summary",
+      headers: ["Metric", "Count"],
+      rows: counts
+    },
+    {
+      name: "Ward Comparison",
+      headers: [
+        "ward_no",
+        "ward_name",
+        "old_consumption_critical",
+        "has_groundwater_data",
+        "current_groundwater_status",
+        "map_category",
+        "action_flag",
+        "computed",
+        "usable_weekly_values",
+        "valid_weekly_comparisons",
+        "linear_slope_ft_per_week",
+        "theil_sen_slope_ft_per_week",
+        "mann_kendall_p_value",
+        "reason"
+      ],
+      rows: comparisonRows
+    }
+  ], "previous_60_vs_current_groundwater_specific_capacity.xlsx");
 }

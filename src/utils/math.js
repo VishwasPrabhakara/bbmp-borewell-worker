@@ -24,6 +24,17 @@ export function roundNumber(value, decimals = 4) {
   return Math.round(numberValue * factor) / factor;
 }
 
+export function inverseSpecificCapacity(specificCapacity, drawdown = null, discharge = null) {
+  const capacityValue = Number(specificCapacity);
+  if (Number.isFinite(capacityValue) && capacityValue > 0) return 1 / capacityValue;
+  const drawdownValue = Number(drawdown);
+  const dischargeValue = Number(discharge);
+  if (Number.isFinite(drawdownValue) && drawdownValue > 0 && Number.isFinite(dischargeValue) && dischargeValue > 0) {
+    return drawdownValue / dischargeValue;
+  }
+  return null;
+}
+
 export function criticalDirection(changeFtPerWeek) {
   if (!Number.isFinite(changeFtPerWeek)) return "Not computed";
   if (changeFtPerWeek > CRITICAL_GW_DECLINE_FT_PER_WEEK) return "Declining";

@@ -27,6 +27,226 @@ export function primaryLevel(point) {
   return null;
 }
 
+export function compactPointLevel(point, key = "water_level") {
+  if (!point) return null;
+  const keys = key === "off_level"
+    ? ["offLevel", "off_level", "waterLevelStartFt", "water_level_start_ft"]
+    : key === "on_level"
+      ? ["onLevel", "on_level", "waterLevelStopFt", "water_level_stop_ft"]
+      : ["waterLevel", "water_level", "level", "waterLevelFt", "water_level_ft"];
+  for (const itemKey of keys) {
+    const value = Number(point[itemKey]);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  return null;
+}
+
+export function compactPointDischarge(point) {
+  if (!point) return null;
+  for (const key of ["discharge", "flowRate", "flow_rate", "flowRateLpm", "flow_rate_lpm", "minDischargeLpm", "min_discharge_lpm"]) {
+    const value = Number(point[key]);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  return null;
+}
+
+export function compactPointDurationMinutes(point) {
+  if (!point) return null;
+  for (const key of ["session_duration_min", "sessionDurationMin", "durationMin", "duration_min", "pumpingDurationMin"]) {
+    const value = Number(point[key]);
+    if (Number.isFinite(value) && value >= 0) return value;
+  }
+  const runtimeHours = Number(point.runtimeHours ?? point.runtime_hours);
+  if (Number.isFinite(runtimeHours) && runtimeHours >= 0) return runtimeHours * 60;
+  return null;
+}
+
+export function cleanedSpecificCapacitySessions(sessions) {
+  const values = (sessions || [])
+    .filter(session => Number.isFinite(Number(session.specificCapacityM2s)) && Number(session.specificCapacityM2s) > 0)
+    .map(session => Number(session.specificCapacityM2s));
+  if (values.length < 4) return (sessions || []).filter(session => Number.isFinite(Number(session.specificCapacityM2s)) && Number(session.specificCapacityM2s) > 0);
+
+  const q1 = percentileFromSorted(values, 0.25);
+  const q3 = percentileFromSorted(values, 0.75);
+  const iqr = q3 - q1;
+  const lower = q1 - 3 * iqr;
+  const upper = q3 + 3 * iqr;
+  return (sessions || []).filter(session => {
+    const value = Number(session.specificCapacityM2s);
+    return Number.isFinite(value) && value > 0 && value >= lower && value <= upper;
+  });
+}
+
+function percentileFromSorted(values, probability) {
+  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+  if (!sorted.length) return null;
+  const position = (sorted.length - 1) * probability;
+  const lower = Math.floor(position);
+  const upper = Math.ceil(position);
+  if (lower === upper) return sorted[lower];
+  return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - lower);
+}
+
+export function averagePumpingMinutesPerDay(sessions) {
+  const byDay = pumpingMinutesByDay(sessions);
+  const values = Array.from(byDay.values());
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+}
+
+export function maxPumpingMinutesPerDay(sessions) {
+  const values = Array.from(pumpingMinutesByDay(sessions).values());
+  return values.length ? Math.max(...values) : null;
+}
+
+function pumpingMinutesByDay(sessions) {
+  const byDay = new Map();
+  for (const session of sessions || []) {
+    const day = session.date || String(session.time || session.start_time || "").slice(0, 10);
+    const duration = Number(session.durationMin ?? session.duration_min);
+    if (!day || !Number.isFinite(duration) || duration <= 0) continue;
+    byDay.set(day, (byDay.get(day) || 0) + duration);
+  }
+  return byDay;
+}
+
+export function monthlySpecificCapacitySheets(rows) {
+  const monthMap = new Map();
+  const sensorMeta = new Map();
+  for (const row of rows || []) {
+    const startTime = row.start_time || row.startTime || row.time;
+    const day = String(startTime || row.date || "").slice(0, 10);
+    if (!day || day.length < 10) continue;
+    const monthKey = day.slice(0, 7);
+    const uid = String(row.uid || "");
+    const wardNo = normalizeWardNoValue(row.ward_no ?? row.wardNo);
+    const sensorKey = `${wardNo}|${row.ward_name ?? row.wardName ?? ""}|${uid}`;
+    if (!sensorMeta.has(sensorKey)) {
+      sensorMeta.set(sensorKey, {
+        wardNo,
+        wardName: row.ward_name ?? row.wardName ?? "",
+        uid
+      });
+    }
+    if (!monthMap.has(monthKey)) monthMap.set(monthKey, new Map());
+    const monthRows = monthMap.get(monthKey);
+    if (!monthRows.has(sensorKey)) monthRows.set(sensorKey, new Map());
+    const dayMap = monthRows.get(sensorKey);
+    if (!dayMap.has(day)) dayMap.set(day, []);
+    dayMap.get(day).push(row);
+  }
+
+  const sheets = [];
+  for (const [monthKey, monthRows] of Array.from(monthMap.entries()).sort((a, b) => a[0].localeCompare(b[0]))) {
+    const days = Array.from(new Set(Array.from(monthRows.values()).flatMap(dayMap => Array.from(dayMap.keys())))).sort();
+    const headerTop = ["Ward No", "Ward Name", "UID"];
+    const headerBottom = ["", "", ""];
+    const merges = [];
+    let column = 4;
+    for (const day of days) {
+      headerTop.push(day, "", "", "", "", "", "", "");
+      headerBottom.push(
+        "Start Water Level (m)",
+        "Stop Water Level (m)",
+        "Start Discharge (m3/s)",
+        "Stop Discharge (m3/s)",
+        "Lowest Discharge (m3/s)",
+        "Pumping Duration (seconds)",
+        "Specific Capacity (m2/s)",
+        "Inverse Specific Capacity (s/m2)"
+      );
+      const startColumn = columnNameLocal(column);
+      const endColumn = columnNameLocal(column + 7);
+      merges.push(`${startColumn}1:${endColumn}1`);
+      column += 8;
+    }
+
+    const bodyRows = Array.from(monthRows.entries())
+      .sort(([a], [b]) => {
+        const metaA = sensorMeta.get(a);
+        const metaB = sensorMeta.get(b);
+        const wardA = Number(metaA?.wardNo);
+        const wardB = Number(metaB?.wardNo);
+        if (Number.isFinite(wardA) && Number.isFinite(wardB) && wardA !== wardB) return wardA - wardB;
+        return String(metaA?.wardNo || "").localeCompare(String(metaB?.wardNo || ""))
+          || String(metaA?.uid || "").localeCompare(String(metaB?.uid || ""));
+      })
+      .map(([sensorKey, dayMap]) => {
+        const meta = sensorMeta.get(sensorKey);
+        const row = [meta?.wardNo || "", meta?.wardName || "", meta?.uid || ""];
+        for (const day of days) {
+          const sessions = dayMap.get(day) || [];
+          row.push(
+            joinSessionValues(sessions, session => metresFromFeet(session.water_level_start_ft ?? session.startWaterLevelFt ?? session.startWaterLevelM, session.startWaterLevelM)),
+            joinSessionValues(sessions, session => metresFromFeet(session.water_level_stop_ft ?? session.stopWaterLevelFt ?? session.stopWaterLevelM, session.stopWaterLevelM)),
+            joinSessionValues(sessions, session => m3sFromLpm(session.start_discharge_lpm ?? session.startDischargeLpm ?? session.lowestDischargeM3s, session.lowestDischargeM3s), 8),
+            joinSessionValues(sessions, session => m3sFromLpm(session.stop_discharge_lpm ?? session.stopDischargeLpm ?? session.lowestDischargeM3s, session.lowestDischargeM3s), 8),
+            joinSessionValues(sessions, session => m3sFromLpm(session.min_discharge_lpm ?? session.minDischargeLpm ?? session.lowestDischargeM3s, session.lowestDischargeM3s), 8),
+            joinSessionValues(sessions, session => Number(session.durationSeconds ?? (Number(session.duration_min ?? session.durationMin) * 60)), 0),
+            joinSessionValues(sessions, session => specificCapacityM2s(session), 8),
+            joinSessionValues(sessions, session => inverseSpecificCapacityValue(session), 2)
+          );
+        }
+        return row;
+      });
+
+    sheets.push({
+      name: monthKey,
+      headerRows: [headerTop, headerBottom],
+      rows: bodyRows,
+      merges
+    });
+  }
+  return sheets.length ? sheets : [{ name: "No data", headers: ["Message"], rows: [["No valid specific-capacity sessions found."]] }];
+}
+
+function joinSessionValues(sessions, getter, decimals = 3) {
+  const values = (sessions || [])
+    .map(getter)
+    .filter(value => Number.isFinite(Number(value)))
+    .map(value => roundNumber(Number(value), decimals));
+  return Array.from(new Set(values.map(value => String(value)))).join("\n");
+}
+
+function metresFromFeet(feetValue, metreValue = null) {
+  const metres = Number(metreValue);
+  if (Number.isFinite(metres)) return metres;
+  const feet = Number(feetValue);
+  return Number.isFinite(feet) ? feet * 0.3048 : null;
+}
+
+function m3sFromLpm(lpmValue, m3sValue = null) {
+  const m3s = Number(m3sValue);
+  if (Number.isFinite(m3s)) return m3s;
+  const lpm = Number(lpmValue);
+  return Number.isFinite(lpm) ? lpm / 60000 : null;
+}
+
+function specificCapacityM2s(session) {
+  const existing = Number(session.specificCapacityM2s);
+  if (Number.isFinite(existing) && existing > 0) return existing;
+  const discharge = m3sFromLpm(session.min_discharge_lpm ?? session.minDischargeLpm);
+  const drawdown = metresFromFeet(session.drawdown_ft ?? session.drawdownFt, session.drawdownM);
+  return Number.isFinite(discharge) && discharge > 0 && Number.isFinite(drawdown) && drawdown > 0 ? discharge / drawdown : null;
+}
+
+function inverseSpecificCapacityValue(session) {
+  const existing = Number(session.inverseSpecificCapacitySPerM2);
+  if (Number.isFinite(existing) && existing > 0) return existing;
+  const capacity = specificCapacityM2s(session);
+  return Number.isFinite(capacity) && capacity > 0 ? 1 / capacity : null;
+}
+
+function columnNameLocal(index) {
+  let name = "";
+  while (index > 0) {
+    const remainder = (index - 1) % 26;
+    name = String.fromCharCode(65 + remainder) + name;
+    index = Math.floor((index - 1) / 26);
+  }
+  return name;
+}
+
 export function localMedian(points, index, radius, key) {
   const start = Math.max(0, index - radius);
   const end = Math.min(points.length, index + radius + 1);
