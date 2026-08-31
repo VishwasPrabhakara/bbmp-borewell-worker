@@ -10,11 +10,7 @@ import { getDb } from "./db/client.js";
 import { adminPage } from "./views/admin-page.js";
 import {
   requireAdmin,
-  isStale,
-  isRunningStale,
   statusPayload,
-  queueRefresh,
-  triggerGithubAction,
   recalculateSummaries,
   uploadTypeA,
   uploadTypeB
@@ -223,18 +219,12 @@ export async function handleRequest(request, env) {
         FROM refresh_status
         WHERE id = 1
       `;
-      const status = rows[0];
-
-      if (status?.running && !isRunningStale(status.last_started)) {
-        return json({ started: false, reason: "already_running", status: statusPayload(status) });
-      }
-
-      if (status?.ok !== false && status && !isStale(status.last_finished)) {
-        return json({ started: false, reason: "fresh", status: statusPayload(status) });
-      }
-
-      await queueRefresh(sql, env, "Refresh queued");
-      return json({ started: true });
+      return json({
+        started: false,
+        reason: "kh_dashboard_refresh_disabled",
+        message: "Water-level data is now accepted only from uploaded KH Excel ZIP files. Use metadata sync only for UID, location, HP, and borewell-depth details.",
+        status: statusPayload(rows[0])
+      });
     }
 
     if (url.pathname === "/api/sensors") {
@@ -1406,8 +1396,11 @@ export async function handleRequest(request, env) {
       }
 
       if (url.pathname === "/api/refresh") {
-        await triggerGithubAction(env);
-        return json({ started: true, reason: "database_not_initialized" });
+        return json({
+          started: false,
+          reason: "kh_dashboard_refresh_disabled",
+          message: "Water-level refresh from the KH dashboard is disabled."
+        });
       }
 
       if (url.pathname === "/api/sensors") {
