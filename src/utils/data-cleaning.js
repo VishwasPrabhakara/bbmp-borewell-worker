@@ -21,8 +21,8 @@ export function isValidWaterLevel(value) {
 }
 
 export function primaryLevel(point) {
-  // For KH cleaned pumping sessions, ON/start is the static level before pumping.
-  // Use it for groundwater trend; OFF/stop is the drawdown level.
+  // For KH cleaned pumping sessions, START is the static level before pumping.
+  // Use it for groundwater trend; END is the deeper drawdown level.
   if (isValidWaterLevel(point.onLevel)) return Number(point.onLevel);
   if (isValidWaterLevel(point.waterLevel)) return Number(point.waterLevel);
   if (isValidWaterLevel(point.offLevel)) return Number(point.offLevel);
@@ -445,10 +445,10 @@ export function sessionDrawdowns(points) {
   return points
     .filter(point => isValidWaterLevel(point.onLevel)
       && isValidWaterLevel(point.offLevel)
-      && Number(point.onLevel) > Number(point.offLevel)
+      && Number(point.offLevel) > Number(point.onLevel)
       && Number(point.runtimeHours) > 0)
     .map(point => {
-      const drop = Number(point.onLevel) - Number(point.offLevel);
+      const drop = Number(point.offLevel) - Number(point.onLevel);
       return {
         label: new Date(point.time).toISOString().slice(0, 10),
         time: point.time,
@@ -534,7 +534,7 @@ export function notUsableReason(row) {
     rangeDetails.push(`${row.discharge_too_high_count} discharge values exceed 20000 LPM`);
   }
   if (Number(row.on_off_logic_error_count) > 0) {
-    rangeDetails.push(`${row.on_off_logic_error_count} readings have ON level less than or equal to OFF level`);
+    rangeDetails.push(`${row.on_off_logic_error_count} pump cycles have END water level less than or equal to START water level`);
   }
   const descriptions = {
     NO_DATA: "No sensor readings are available.",
@@ -548,8 +548,8 @@ export function notUsableReason(row) {
     SPIKES: `${row.spike_count || 0} sudden spike/drop events detected between consecutive readings.`,
     FLATLINES: `${row.flatline_count || 0} flatline stretches detected, suggesting the sensor may be stuck or not updating.`,
     DUPLICATE_TIMESTAMPS: "Duplicate timestamps were found in the raw readings.",
-    NO_VALID_PUMPING_SESSIONS: "No valid ON-to-OFF pumping sessions were found for this UID.",
-    INVALID_DRAWDOWN_SESSIONS: "Some sessions have stop/OFF water level shallower than or equal to start/ON water level, so drawdown is not physically valid for pumping analysis.",
+    NO_VALID_PUMPING_SESSIONS: "No valid KH pump START-to-END cycles were found for this UID.",
+    INVALID_DRAWDOWN_SESSIONS: "Some sessions have pump END water level shallower than or equal to pump START water level, so drawdown is not physically valid for pumping analysis.",
     NO_DISCHARGE_SESSIONS: "Some sessions have no positive discharge value, so specific capacity cannot be calculated for those sessions.",
     BAD_DURATION_SESSIONS: "Some sessions have zero or invalid pumping duration.",
     LOW_CLEAN_SESSION_PERCENT: "Less than half of the sessions are clean enough for pumping analysis.",

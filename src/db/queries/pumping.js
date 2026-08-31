@@ -93,12 +93,18 @@ export async function pumpingPerformanceWardSummaries(sql) {
         b.uid,
         COALESCE(NULLIF(a.ward_no, ''), NULLIF(s.ward_no, ''), NULLIF(q.ward_no, '')) AS ward_no,
         COALESCE(NULLIF(a.ward_name, ''), NULLIF(s.ward_name, ''), NULLIF(q.ward_name, '')) AS ward_name,
-        COALESCE(b.avg_discharge_lpm, b.min_discharge_lpm) * b.session_duration_min / 1000.0 AS pumped_volume_m3,
+        COALESCE(
+          NULLIF(b.pumped_volume_m3, 0),
+          COALESCE(b.avg_discharge_lpm, b.min_discharge_lpm) * b.session_duration_min / 1000.0
+        ) AS pumped_volume_m3,
         (b.min_discharge_lpm * ${LPM_TO_M3_PER_SEC})
           / ((b.water_level_stop_ft - b.water_level_start_ft) * ${FT_TO_M})
           * ${TRANSMISSIVITY_SCALE} AS specific_capacity_scaled,
         (b.water_level_stop_ft - b.water_level_start_ft)
-          / (COALESCE(b.avg_discharge_lpm, b.min_discharge_lpm) * b.session_duration_min / 1000.0)
+          / COALESCE(
+            NULLIF(b.pumped_volume_m3, 0),
+            COALESCE(b.avg_discharge_lpm, b.min_discharge_lpm) * b.session_duration_min / 1000.0
+          )
           AS drawdown_ft_per_m3
       FROM uploaded_type_b_sessions b
       LEFT JOIN sensors s ON s.uid = b.uid
@@ -111,6 +117,10 @@ export async function pumpingPerformanceWardSummaries(sql) {
         AND b.water_level_stop_ft > b.water_level_start_ft
         AND b.min_discharge_lpm > 0
         AND COALESCE(b.avg_discharge_lpm, b.min_discharge_lpm) > 0
+        AND COALESCE(
+          NULLIF(b.pumped_volume_m3, 0),
+          COALESCE(b.avg_discharge_lpm, b.min_discharge_lpm) * b.session_duration_min / 1000.0
+        ) > 0
         AND COALESCE(NULLIF(a.ward_no, ''), NULLIF(s.ward_no, ''), NULLIF(q.ward_no, '')) IS NOT NULL
     ),
     uid_performance AS (

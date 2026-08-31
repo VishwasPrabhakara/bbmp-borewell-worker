@@ -603,15 +603,25 @@ export async function handleRequest(request, env) {
             b.water_level_stop_ft - b.water_level_start_ft AS drawdown_ft,
             COALESCE(b.avg_discharge_lpm, b.min_discharge_lpm) AS volume_discharge_lpm,
             b.min_discharge_lpm,
-            COALESCE(b.avg_discharge_lpm, b.min_discharge_lpm) * b.session_duration_min / 1000.0 AS pumped_volume_m3,
+            COALESCE(
+              NULLIF(b.pumped_volume_m3, 0),
+              COALESCE(b.avg_discharge_lpm, b.min_discharge_lpm) * b.session_duration_min / 1000.0
+            ) AS pumped_volume_m3,
             (b.min_discharge_lpm * ${LPM_TO_M3_PER_SEC}) / ((b.water_level_stop_ft - b.water_level_start_ft) * ${FT_TO_M}) * ${TRANSMISSIVITY_SCALE} AS specific_capacity_scaled,
-            (b.water_level_stop_ft - b.water_level_start_ft) / (COALESCE(b.avg_discharge_lpm, b.min_discharge_lpm) * b.session_duration_min / 1000.0) AS drawdown_ft_per_m3
+            (b.water_level_stop_ft - b.water_level_start_ft) / COALESCE(
+              NULLIF(b.pumped_volume_m3, 0),
+              COALESCE(b.avg_discharge_lpm, b.min_discharge_lpm) * b.session_duration_min / 1000.0
+            ) AS drawdown_ft_per_m3
           FROM uploaded_type_b_sessions b
           LEFT JOIN sensors s ON s.uid = b.uid
           LEFT JOIN sensor_ward_assignments a ON a.uid = b.uid
           WHERE b.start_time IS NOT NULL AND b.stop_time IS NOT NULL AND b.session_duration_min > 0
             AND b.water_level_start_ft IS NOT NULL AND b.water_level_stop_ft > b.water_level_start_ft
             AND b.min_discharge_lpm > 0 AND COALESCE(b.avg_discharge_lpm, b.min_discharge_lpm) > 0
+            AND COALESCE(
+              NULLIF(b.pumped_volume_m3, 0),
+              COALESCE(b.avg_discharge_lpm, b.min_discharge_lpm) * b.session_duration_min / 1000.0
+            ) > 0
             AND COALESCE(NULLIF(a.ward_no, ''), NULLIF(s.ward_no, '')) IS NOT NULL
         ),
         uid_performance AS (
@@ -774,7 +784,7 @@ export async function handleRequest(request, env) {
         sensors,
         thresholds,
         method: {
-          volume: "Pumped volume (m3) = average session discharge (L/min) x pumping duration (min) / 1000. Minimum discharge is used only when average discharge is unavailable.",
+          volume: "Pumped volume (m3) = end cumulative water yield - start cumulative water yield when available; otherwise average session discharge (L/min) x pumping duration (min) / 1000.",
           normalizedDrawdown: "Volume-normalized drawdown (ft/m3) = pumping drawdown (ft) / pumped volume (m3). Higher values indicate a larger water-level response per unit extracted volume.",
           classification: "Screening classes use current citywide percentile thresholds and update with the database. They are relative screening categories, not universal engineering limits."
         }
@@ -897,7 +907,7 @@ export async function handleRequest(request, env) {
             wardName: sensor.ward_name,
             reason: sameRecordCandidateCount || bridgedSessionCandidateCount
               ? "Water level and discharge exist, but no session had positive drawdown, positive duration, and discharge inside the pumping period."
-              : "Water level and discharge exist for this UID, but OFF/ON pumping-session pairs could not be identified."
+              : "Water level and discharge exist for this UID, but KH pump START-to-END cycle pairs could not be identified."
           });
           continue;
         }

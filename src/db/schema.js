@@ -36,7 +36,10 @@ export async function ensureUploadedTables(sql) {
       stop_discharge_lpm DOUBLE PRECISION NULL,
       avg_discharge_lpm DOUBLE PRECISION NULL,
       max_discharge_lpm DOUBLE PRECISION NULL,
-      discharge_readings_in_session INTEGER DEFAULT 0
+      discharge_readings_in_session INTEGER DEFAULT 0,
+      cumulative_yield_start_kl DOUBLE PRECISION NULL,
+      cumulative_yield_stop_kl DOUBLE PRECISION NULL,
+      pumped_volume_m3 DOUBLE PRECISION NULL
     )
   `;
   await sql`ALTER TABLE uploaded_type_b_sessions ADD COLUMN IF NOT EXISTS min_discharge_lpm DOUBLE PRECISION NULL`;
@@ -45,6 +48,9 @@ export async function ensureUploadedTables(sql) {
   await sql`ALTER TABLE uploaded_type_b_sessions ADD COLUMN IF NOT EXISTS avg_discharge_lpm DOUBLE PRECISION NULL`;
   await sql`ALTER TABLE uploaded_type_b_sessions ADD COLUMN IF NOT EXISTS max_discharge_lpm DOUBLE PRECISION NULL`;
   await sql`ALTER TABLE uploaded_type_b_sessions ADD COLUMN IF NOT EXISTS discharge_readings_in_session INTEGER DEFAULT 0`;
+  await sql`ALTER TABLE uploaded_type_b_sessions ADD COLUMN IF NOT EXISTS cumulative_yield_start_kl DOUBLE PRECISION NULL`;
+  await sql`ALTER TABLE uploaded_type_b_sessions ADD COLUMN IF NOT EXISTS cumulative_yield_stop_kl DOUBLE PRECISION NULL`;
+  await sql`ALTER TABLE uploaded_type_b_sessions ADD COLUMN IF NOT EXISTS pumped_volume_m3 DOUBLE PRECISION NULL`;
   initializedTables.add("uploaded");
 }
 

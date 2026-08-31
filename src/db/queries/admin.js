@@ -214,7 +214,10 @@ export async function uploadTypeB(sql, rows) {
         tts_stop_seconds double precision,
         water_level_stop_m double precision,
         water_level_stop_ft double precision,
-        session_duration_min double precision
+        session_duration_min double precision,
+        cumulative_yield_start_kl double precision,
+        cumulative_yield_stop_kl double precision,
+        pumped_volume_m3 double precision
       )
     ),
     input AS (
@@ -231,7 +234,10 @@ export async function uploadTypeB(sql, rows) {
         MAX(tts_stop_seconds) AS tts_stop_seconds,
         MAX(water_level_stop_m) AS water_level_stop_m,
         MAX(water_level_stop_ft) AS water_level_stop_ft,
-        MAX(session_duration_min) AS session_duration_min
+        MAX(session_duration_min) AS session_duration_min,
+        MAX(cumulative_yield_start_kl) AS cumulative_yield_start_kl,
+        MAX(cumulative_yield_stop_kl) AS cumulative_yield_stop_kl,
+        MAX(pumped_volume_m3) AS pumped_volume_m3
       FROM raw_input
       WHERE uid IS NOT NULL AND uid <> '' AND start_time IS NOT NULL AND stop_time IS NOT NULL
       GROUP BY uid, start_time, stop_time
@@ -240,13 +246,15 @@ export async function uploadTypeB(sql, rows) {
       uid, lat, lng, source_file, start_time, stop_time,
       tts_start_seconds, water_level_start_m, water_level_start_ft,
       tts_stop_seconds, water_level_stop_m, water_level_stop_ft,
-      session_duration_min
+      session_duration_min, cumulative_yield_start_kl, cumulative_yield_stop_kl,
+      pumped_volume_m3
     )
     SELECT
       uid, lat, lng, source_file, start_time, stop_time,
       tts_start_seconds, water_level_start_m, water_level_start_ft,
       tts_stop_seconds, water_level_stop_m, water_level_stop_ft,
-      session_duration_min
+      session_duration_min, cumulative_yield_start_kl, cumulative_yield_stop_kl,
+      pumped_volume_m3
     FROM input
     WHERE NOT EXISTS (
       SELECT 1
